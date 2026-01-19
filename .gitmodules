@@ -1,0 +1,3 @@
+[submodule "vendor/cutie-ftree"]
+	path = vendor/cutie-ftree
+	url = /Users/cutiedeng/Documents/eoc-book/rvsdg-compiler/cutie-ftree
