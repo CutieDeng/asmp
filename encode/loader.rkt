@@ -30,9 +30,13 @@
 (define (tags->ordered-map tags [stx #f] [enc-stx #f])
   (cond
     [(list? tags)
+     (define seen (make-hash))
      (for/fold ([m (ordered-map-empty string-compare)]) ([tag (in-list tags)])
        (unless (string? tag)
          (raise-or-error 'file->encode "invalid tag" tag stx enc-stx))
+       (when (hash-ref seen tag #f)
+         (raise-or-error 'file->encode "duplicate tag" tag stx enc-stx))
+       (hash-set! seen tag #t)
        (ordered-map-set m tag #t))]
     [else (raise-or-error 'file->encode "invalid tags" tags stx enc-stx)]))
 
@@ -86,6 +90,7 @@
     (and (syntax? fields-stx) (syntax->list fields-stx)))
   (unless (list? fields)
     (raise-or-error 'file->encode "invalid fields" fields fields-stx enc-stx))
+  (define seen (make-hash))
   (define total-bits
     (for/sum ([e (in-list fields)])
       (field-len e fields-stx enc-stx)))
@@ -99,10 +104,19 @@
                   ([e (in-list fields)]
                    [e-stx (in-list fields-stx-list)])
           (define field (syntax->encode-field e-stx hi enc-stx))
+          (define name (encode-field-name field))
+          (when (and name (hash-ref seen name #f))
+            (raise-or-error 'file->encode "duplicate field" name e-stx enc-stx))
+          (when name (hash-set! seen name #t))
           (values (pvector-cons-right acc field) (encode-field-lo field)))
         (for/fold ([acc (pvector-empty)] [hi total-bits])
                   ([e (in-list fields)])
-          (define field (syntax->encode-field (datum->syntax fields-stx e) hi enc-stx))
+          (define e-stx (datum->syntax fields-stx e))
+          (define field (syntax->encode-field e-stx hi enc-stx))
+          (define name (encode-field-name field))
+          (when (and name (hash-ref seen name #f))
+            (raise-or-error 'file->encode "duplicate field" name e-stx enc-stx))
+          (when name (hash-set! seen name #t))
           (values (pvector-cons-right acc field) (encode-field-lo field)))))
   pv)
 
