@@ -11,6 +11,7 @@
          "regalloc/rewriter.rkt"
          "regalloc/abi.rkt"
          "regalloc/spill-config.rkt"
+         "regalloc/save-load.rkt"
          "../semantic/control-flow.rkt"
          "../vendor/cutie-ftree/pvector.rkt")
 
@@ -34,7 +35,8 @@
   (all-from-out "regalloc/allocator.rkt")
   (all-from-out "regalloc/rewriter.rkt")
   (all-from-out "regalloc/abi.rkt")
-  (all-from-out "regalloc/spill-config.rkt"))
+  (all-from-out "regalloc/spill-config.rkt")
+  (all-from-out "regalloc/save-load.rkt"))
 
 ;; ============================================================
 ;; 配置
@@ -136,12 +138,29 @@
 
       ;; 无溢出 - 完成
       [else
-       (define final-fn (rewrite-function current-fn alloc-result))
+       ;; 4. 重写虚拟寄存器为物理寄存器
+       (define rewritten-fn (rewrite-function current-fn alloc-result))
+
+       ;; 5. 处理 save!/load! 指令
+       (define sl-context (analyze-save-load rewritten-fn alloc-result))
+       (define final-fn
+         (if (null? (save-load-context-regions sl-context))
+             rewritten-fn
+             (expand-save-load rewritten-fn sl-context)))
+
+       (when (and debug? (not (null? (save-load-context-regions sl-context))))
+         (printf "save!/load! 区域: ~a\n"
+                 (length (save-load-context-regions sl-context)))
+         (printf "save!/load! 栈空间: ~a 字节\n"
+                 (save-load-context-total-stack-size sl-context)))
+
        (define spill-slots (compute-spill-slots spilled))
-       (define frame-size (compute-frame-size spill-slots))
+       (define save-load-size (save-load-context-total-stack-size sl-context))
+       (define frame-size (+ (compute-frame-size spill-slots) save-load-size))
 
        (pipeline-result final-fn liveness mig alloc-result multi-result
-                        spill-slots frame-size iter '())])))
+                        spill-slots frame-size iter
+                        (save-load-context-errors sl-context))])))
 
 ;; 从 graph 模块获取顶点数
 (require "../vendor/cutie-ftree/graph.rkt")
