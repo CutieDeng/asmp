@@ -21,8 +21,9 @@
     (build-path config-dir p)))
 
 (define (run)
+  (define seen (make-hash))
   (for ([p (in-list (config-paths))])
-    (define encs (file->encodes p))
+    (define encs (file->encodes p seen))
     (check-true (and (pvector? encs) (>= (pvector-length encs) 1)))
   ))
 

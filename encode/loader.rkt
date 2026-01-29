@@ -12,6 +12,7 @@
 (provide
  syntax->encode-field
  enforce-32b?
+ enforce-unique-encode-name?
  port->encode
  file->encode
  file->encodes)
@@ -84,6 +85,7 @@
     [_ (raise-or-error 'file->encode "invalid field" v stx enc-stx)]))
 
 (define enforce-32b? (make-parameter #t))
+(define enforce-unique-encode-name? (make-parameter #t))
 
 (define (fields->pvector fields [fields-stx #f] [enc-stx #f])
   (define fields-stx-list
@@ -149,11 +151,23 @@
   (call-with-input-file path
     (lambda (in) (port->encode in path))))
 
-(define (file->encodes path)
+(define (file->encodes path [seen #f])
   (call-with-input-file path
     (lambda (in)
+      (define enforce-unique-name? (enforce-unique-encode-name?))
+      (define seen* (and enforce-unique-name?
+                         (or seen (make-hash))))
       (let loop ([acc (pvector-empty)])
         (define stx (read-syntax path in))
         (if (eof-object? stx)
             acc
-            (loop (pvector-cons-right acc (syntax->encode stx))))))))
+            (let ([enc (syntax->encode stx)])
+              (define name (encode-name enc))
+              (when (and enforce-unique-name? (hash-ref seen* name #f))
+                (raise-syntax-error
+                 'file->encodes
+                 (format "duplicate encode name: ~a" name)
+                 stx))
+              (when enforce-unique-name?
+                (hash-set! seen* name #t))
+              (loop (pvector-cons-right acc enc))))))))
