@@ -159,7 +159,7 @@
 ((ssra c3) ((sve-z sve-z immediate) (simd-vector simd-vector immediate) (simd-scalar simd-scalar immediate)))
 ((smmla c3) ((simd-vector simd-vector simd-vector) (sve-z sve-z sve-z)))
 ((sm4ekey c3) ((simd-vector simd-vector simd-vector) (sve-z sve-z sve-z)))
-((mov c2) ((gpr-32 immediate) (gpr-64 immediate) (gpr-32 gpr-32) (gpr-64 gpr-64)))
+((mov c2) ((gpr-32 immediate) (gpr-64 immediate) (gpr-32 gpr-32) (gpr-64 gpr-64) (gpr-64 negimm) (gpr-32 negimm)))
 ((usubl c3) ((simd-vector simd-vector simd-vector)))
 ((ld1roh c2m) ((reg-list sve-p memory)))
 ((casal c2m) ((gpr-32 gpr-32 memory) (gpr-64 gpr-64 memory)))

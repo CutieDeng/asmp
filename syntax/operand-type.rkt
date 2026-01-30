@@ -42,7 +42,8 @@
 ;;   sme-zt         ; ZT0, ZT0[UInteger] (查找表寄存器)
 ;;
 ;; === 立即数和常量 ===
-;;   immediate      ; UInteger, SInteger
+;;   immediate      ; UInteger, SInteger (非负)
+;;   negimm         ; 负数立即数 (用于 mov → movn 别名)
 ;;   float-const    ; Real, 0.0 (浮点常量)
 ;;
 ;; === 关键字和修饰符 ===
@@ -70,7 +71,7 @@
             simd-scalar simd-vector simd-element
             sve-z sve-p sve-pn
             sme-za sme-zt
-            immediate float-const
+            immediate negimm float-const
             keyword barrier-option prefetch-op vector-length pre-index
             memory
             reg-list
@@ -253,8 +254,9 @@
     [(ast-reg kind id _ _ element pred-mode _)
      (classify-ast-reg kind id element pred-mode)]
 
-    ;; 立即数
-    [(ast-imm _ _) 'immediate]
+    ;; 立即数 - 区分正数和负数
+    [(ast-imm value _)
+     (if (< value 0) 'negimm 'immediate)]
 
     ;; 标签
     [(ast-label _ _) 'label]

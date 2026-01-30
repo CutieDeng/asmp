@@ -206,7 +206,7 @@
 
 ;; 应用转换规则
 ;; transform-rule: (elem ...)
-;; elem: N (索引) | (zr size) | (const val)
+;; elem: N (索引) | (zr size) | (const val) | (bitnot N)
 (define (apply-transform transform-rule operands ins)
   (define loc (ast-ins-loc ins))
   (for/list ([elem (in-list transform-rule)])
@@ -218,6 +218,14 @@
       [(list 'zr size)
        (define kind (if (= size 64) 'x 'w))
        (ast-reg kind 'zr #f #f #f #f loc)]
+      ;; 按位取反 - 用于 mov → movn (MRS: MOV_MOVN)
+      ;; mov Xd, -1 → movn Xd, #0 (因为 ~0 = -1)
+      [(list 'bitnot idx)
+       (define orig-op (list-ref operands idx))
+       (match orig-op
+         [(ast-imm value orig-loc)
+          (ast-imm (bitwise-not value) orig-loc)]
+         [_ orig-op])]
       ;; 常量
       [(list 'const val)
        (cond
@@ -249,8 +257,8 @@
              [i (in-naturals)])
     (match op
       [(ast-imm value _)
-       (cons (cons (format "imm~a" (add1 i)) value)
-             (cons (cons "imm" value) result))]
+       ;; 只添加带索引的版本，避免重复
+       (cons (cons (format "imm~a" (add1 i)) value) result)]
       [(ast-reg kind id _ _ _ _ _)
        (if (number? id)
            (cons (cons (reg-kind->field-name kind) id) result)
@@ -314,9 +322,13 @@
         (format "立即数 ~a 必须是 ~a 的倍数 (最近的合法值: ~a 或 ~a)"
                 value step aligned (+ aligned step))]
        [(< value min)
-        (format "立即数 ~a 太小，最小值为 ~a" value min)]
+        (if (< value 0)
+            (format "立即数 ~a 是负数，试试 movn (mov-not) 指令" value)
+            (format "立即数 ~a 太小，最小值为 ~a" value min))]
        [(> value max)
-        (format "立即数 ~a 太大，最大值为 ~a" value max)]
+        (if (> value 65535)
+            (format "立即数 ~a 太大 (最大 65535)，试试 movz+movk 组合或 ldr 从字面量池加载" value)
+            (format "立即数 ~a 太大，最大值为 ~a" value max))]
        [else
         (format "立即数 ~a 不在允许范围 [~a, ~a] 内" value min max)])]
     [(reg-range min max)

@@ -33,7 +33,7 @@
 
 (mul ((c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
 
-(mov ((c2 (gpr-64 gpr-64)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 immediate)) (c2 (gpr-32 immediate))))
+(mov ((c2 (gpr-32 negimm)) (c2 (gpr-64 negimm)) (c2 (gpr-64 gpr-64)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 immediate)) (c2 (gpr-32 immediate))))
 
 (ngcs ((c2 (gpr-64 gpr-64)) (c2 (gpr-32 gpr-32))))
 

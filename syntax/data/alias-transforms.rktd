@@ -33,7 +33,7 @@
 
 (mul ((c3 (gpr-32 gpr-32 gpr-32)) madd (0 1 2 (zr 32))) ((c3 (gpr-64 gpr-64 gpr-64)) madd (0 1 2 (zr 64))))
 
-(mov ((c2 (gpr-64 gpr-64)) orr (0 (zr 64) 1 (const lsl) (const 0))) ((c2 (gpr-32 gpr-32)) orr (0 (zr 32) 1 (const lsl) (const 0))) ((c2 (gpr-64 immediate)) movz (0 1)) ((c2 (gpr-32 immediate)) movz (0 1)))
+(mov ((c2 (gpr-32 negimm)) movn (0 (bitnot 1))) ((c2 (gpr-64 negimm)) movn (0 (bitnot 1))) ((c2 (gpr-64 gpr-64)) orr (0 (zr 64) 1 (const lsl) (const 0))) ((c2 (gpr-32 gpr-32)) orr (0 (zr 32) 1 (const lsl) (const 0))) ((c2 (gpr-64 immediate)) movz (0 1)) ((c2 (gpr-32 immediate)) movz (0 1)))
 
 (ngcs ((c2 (gpr-64 gpr-64)) sbcs (0 (zr 64) 1)) ((c2 (gpr-32 gpr-32)) sbcs (0 (zr 32) 1)))
 

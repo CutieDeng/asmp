@@ -33,6 +33,7 @@
 ;;   N         = 使用第 N 个输入操作数
 ;;   (zr SIZE) = 插入零寄存器 (32 或 64)
 ;;   (const V) = 插入常量值
+;;   (bitnot N) = 对第 N 个操作数取按位取反 (用于 mov → movn)
 
 (define ALIAS_DEFINITIONS
   (hash
@@ -43,12 +44,23 @@
    '(mov c2 (gpr-64 gpr-64))
    '(orr (0 (zr 64) 1 (const lsl) (const 0)))
 
-   ;; MOV (immediate) → MOVZ Rd, #imm
+   ;; MOV (immediate, positive) → MOVZ Rd, #imm
+   ;; MRS: MOV_MOVZ
    '(mov c2 (gpr-32 immediate))
    '(movz (0 1))
 
    '(mov c2 (gpr-64 immediate))
    '(movz (0 1))
+
+   ;; MOV (immediate, negative) → MOVN Rd, #~imm
+   ;; MRS: MOV_MOVN
+   ;; 对于 mov Xd, -1 → movn Xd, #0 (因为 ~0 = -1)
+   ;; 对于 mov Xd, -100 → movn Xd, #99 (因为 ~99 = -100)
+   '(mov c2 (gpr-32 negimm))
+   '(movn (0 (bitnot 1)))
+
+   '(mov c2 (gpr-64 negimm))
+   '(movn (0 (bitnot 1)))
 
    ;; CMP (register) → SUBS ZR, Rn, Rm
    '(cmp c2 (gpr-32 gpr-32))

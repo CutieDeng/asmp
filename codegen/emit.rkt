@@ -414,8 +414,11 @@
   (parameterize ([current-function-name fn-name]
                  [current-function-labels local-labels])
 
-    ;; 获取函数对齐属性 (默认 2 = 4字节对齐)
-    (define fn-align (fn-get-info fn 'align 2))
+    ;; 获取函数对齐属性
+    ;; = max(用户指定的对齐, 函数内部最大对齐)
+    (define user-align (fn-get-info fn 'align 2))
+    (define internal-align (fn-get-info fn 'max-internal-align 2))
+    (define fn-align (max user-align internal-align))
 
     ;; 函数头
     (port-write-string port ".globl ")
@@ -441,9 +444,6 @@
     (define entry-id (asm-function-entry fn))
     (define visited (make-hash))
 
-    ;; 获取 label 对齐信息
-    (define label-alignments (fn-get-info fn 'label-alignments (hash)))
-
     ;; BFS 遍历基本块
     (define (emit-block bb-id)
       (unless (hash-has-key? visited (bb-id-val bb-id))
@@ -454,12 +454,6 @@
           (unless (equal? bb-id entry-id)
             (define label (fn-get-label fn bb-id))
             (when label
-              ;; 检查 label 是否有对齐要求
-              (define label-align (hash-ref label-alignments label #f))
-              (when label-align
-                (port-write-string port ".p2align ")
-                (port-display port label-align)
-                (port-newline port))
               ;; 输出局部标签 (L<func>$<label>:)
               (port-write-string port (make-local-label fn-name label))
               (port-write-string port ":")

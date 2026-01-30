@@ -292,17 +292,15 @@
 
 ;; 构建单个函数
 (define (build-single-function fn-id fn-name items start-bb-id)
-  (define-values (instructions label-positions label-alignments)
+  (define-values (instructions label-positions max-internal-align)
     (collect-instructions-and-labels items))
 
   (define n-instructions (pvector-length instructions))
 
-  ;; 将 label-alignments 转换为 info 条目
+  ;; 将内部最大对齐存储到 info 中
   (define base-info
-    (if (hash-empty? label-alignments)
-        (ordered-map-empty symbol-compare)
-        (ordered-map-set (ordered-map-empty symbol-compare)
-                         'label-alignments label-alignments)))
+    (ordered-map-set (ordered-map-empty symbol-compare)
+                     'max-internal-align max-internal-align))
 
   (cond
     [(= n-instructions 0)
@@ -334,46 +332,32 @@
       next-bb)]))
 
 (define (collect-instructions-and-labels items)
-  ;; 返回: instructions, label-positions, label-alignments
-  ;; label-alignments: hash[symbol -> integer] - label 的对齐要求
-  (define-values (instructions label-positions label-alignments _)
+  ;; 返回: instructions, label-positions, max-align
+  (define-values (instructions label-positions max-align)
     (for/fold ([instructions (pvector-empty)]
                [label-positions (hash)]
-               [label-alignments (hash)]
-               [pending-label #f])  ; 刚刚看到的 label 名称
+               [max-align 2])  ;; 默认最小对齐 2
               ([item (in-list items)])
       (match item
         [(ast-directive 'label name _ _)
          (values instructions
                  (hash-set label-positions name (pvector-length instructions))
-                 label-alignments
-                 name)]  ; 记录这个 label
-        ;; align 紧跟在 label 之后 -> 记录 label 的对齐，不加入指令流
+                 max-align)]
         [(ast-directive 'align #f (list n) _)
-         #:when pending-label
-         (values instructions
-                 label-positions
-                 (hash-set label-alignments pending-label n)
-                 #f)]
-        ;; 普通 align (不在 label 之后) -> 加入指令流
-        [(ast-directive 'align _ _ _)
          (values (pvector-cons-right instructions item)
                  label-positions
-                 label-alignments
-                 #f)]
+                 (max max-align n))]  ;; 更新最大对齐
         [(? ast-ins?)
          (values (pvector-cons-right instructions item)
                  label-positions
-                 label-alignments
-                 #f)]
+                 max-align)]
         ;; 保留 save!/load!/weak-mov 指令在指令流中
         [(ast-directive (or 'save! 'load! 'weak-mov) _ _ _)
          (values (pvector-cons-right instructions item)
                  label-positions
-                 label-alignments
-                 #f)]
-        [_ (values instructions label-positions label-alignments #f)])))
-  (values instructions label-positions label-alignments))
+                 max-align)]
+        [_ (values instructions label-positions max-align)])))
+  (values instructions label-positions max-align))
 
 (define (compute-block-starts instructions label-positions)
   (define starts (mutable-set 0))
