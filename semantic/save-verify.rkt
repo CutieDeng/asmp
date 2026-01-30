@@ -225,12 +225,12 @@
 
   (let loop ()
     (unless (null? worklist)
-      (define bb-id-val (car worklist))
+      (define current-bb-val (car worklist))
       (set! worklist (cdr worklist))
 
-      (define block (fn-get-block fn bb-id-val))
+      (define block (fn-get-block fn current-bb-val))
       (when block
-        (define in-state (hash-ref block-in bb-id-val (empty-depth-state)))
+        (define in-state (hash-ref block-in current-bb-val (empty-depth-state)))
 
         ;; 处理块内指令
         (define-values (out-state block-errors)
@@ -238,7 +238,7 @@
                      [errors '()])
                     ([ins (in-pvector (basic-block-instructions block))]
                      [i (in-naturals)])
-            (define key (cons bb-id-val i))
+            (define key (cons current-bb-val i))
             (cond
               [(hash-ref save-at key #f)
                => (lambda (sp)
@@ -255,11 +255,11 @@
         (set! all-errors (append block-errors all-errors))
 
         ;; 更新出口状态
-        (define old-out (hash-ref block-out bb-id-val #f))
-        (hash-set! block-out bb-id-val out-state)
+        (define old-out (hash-ref block-out current-bb-val #f))
+        (hash-set! block-out current-bb-val out-state)
 
         ;; 传播到后继
-        (for ([succ-bbid (in-list (fn-successors fn (bb-id bb-id-val)))])
+        (for ([succ-bbid (in-list (fn-successors fn (bb-id current-bb-val)))])
           (define succ-val (bb-id-val succ-bbid))
           (define old-in (hash-ref block-in succ-val #f))
           (if old-in

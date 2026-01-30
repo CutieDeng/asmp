@@ -172,10 +172,18 @@
 
     ;; 标签引用
     [(ast-label name _)
-     (define prefix (emit-config-label-prefix (current-emit-config)))
-     (unless (string=? prefix "")
-       (port-write-string port prefix))
-     (port-display port name)]
+     (define fn-name (current-function-name))
+     (define local-labels (current-function-labels))
+     (cond
+       ;; 函数内的局部标签
+       [(and fn-name (set-member? local-labels name))
+        (port-write-string port (make-local-label fn-name name))]
+       ;; 外部引用 (函数名等)
+       [else
+        (define prefix (emit-config-label-prefix (current-emit-config)))
+        (unless (string=? prefix "")
+          (port-write-string port prefix))
+        (port-display port name)])]
 
     ;; 移位
     [(ast-shift kind amount _)
@@ -342,10 +350,12 @@
      (port-display port name)
      #t]
 
-    ;; 对齐
+    ;; 对齐 (在代码段中使用 nop 填充)
     [(align)
+     (port-write-string port (emit-config-indent config))
      (port-write-string port ".p2align ")
      (port-display port (car args))
+     ;; ARM64 nop = 0xd503201f，汇编器在代码段默认会用 nop 填充
      #t]
 
     ;; 全局符号
@@ -372,6 +382,21 @@
       ""))
 
 ;; ============================================================
+;; 局部标签名称生成
+;; ============================================================
+
+;; 当前函数名 (用于生成局部标签)
+(define current-function-name (make-parameter #f))
+
+;; 当前函数的局部标签集合 (用于区分局部/外部引用)
+(define current-function-labels (make-parameter (set)))
+
+;; 生成局部标签名: L<func>$<label>
+;; 使用 L 前缀使其成为局部标签（不导出到符号表）
+(define (make-local-label fn-name label-name)
+  (format "L~a$~a" fn-name label-name))
+
+;; ============================================================
 ;; 函数输出 (高性能端口版本)
 ;; ============================================================
 
@@ -380,66 +405,88 @@
   (define prefix (emit-config-label-prefix config))
   (define fn-name (asm-function-name fn))
 
-  ;; 函数头
-  (port-write-string port ".globl ")
-  (port-write-string port prefix)
-  (port-display port fn-name)
-  (port-newline port)
+  ;; 收集函数内的所有局部标签
+  (define local-labels
+    (for/set ([kv (in-ordered-map (asm-function-label->id fn))])
+      (car kv)))
 
-  (when (eq? (emit-config-syntax config) 'apple)
-    (port-write-string port ".p2align 2")
-    (port-newline port))
+  ;; 设置当前函数上下文
+  (parameterize ([current-function-name fn-name]
+                 [current-function-labels local-labels])
 
-  (port-write-string port prefix)
-  (port-display port fn-name)
-  (port-write-string port ":")
-  (port-newline port)
+    ;; 获取函数对齐属性 (默认 2 = 4字节对齐)
+    (define fn-align (fn-get-info fn 'align 2))
 
-  (when (emit-config-emit-cfi? config)
-    (port-write-string port ".cfi_startproc")
-    (port-newline port))
+    ;; 函数头
+    (port-write-string port ".globl ")
+    (port-write-string port prefix)
+    (port-display port fn-name)
+    (port-newline port)
 
-  ;; 按基本块顺序输出
-  (define entry-id (asm-function-entry fn))
-  (define visited (make-hash))
+    ;; 对齐指令 (使用函数属性或默认值)
+    (port-write-string port ".p2align ")
+    (port-display port fn-align)
+    (port-newline port)
 
-  ;; BFS 遍历基本块
-  (define (emit-block bb-id)
-    (unless (hash-has-key? visited (bb-id-val bb-id))
-      (hash-set! visited (bb-id-val bb-id) #t)
-      (define block (fn-get-block fn (bb-id-val bb-id)))
-      (when block
-        ;; 标签 (非入口块)
-        (unless (equal? bb-id entry-id)
-          (define label (fn-get-label fn bb-id))
-          (when label
-            (port-write-string port prefix)
-            (port-display port label)
-            (port-write-string port ":")
-            (port-newline port)))
+    (port-write-string port prefix)
+    (port-display port fn-name)
+    (port-write-string port ":")
+    (port-newline port)
 
-        ;; 指令
-        (for ([ins (in-pvector (basic-block-instructions block))])
-          (cond
-            [(ast-ins? ins)
-             ;; 检查是否跳过冗余指令
-             (unless (and (emit-config-skip-redundant-mov? config)
-                          (redundant-instruction? ins))
-               (emit-instruction/port ins port)
-               (port-newline port))]
-            [(ast-directive? ins)
-             (when (emit-directive/port ins port)
-               (port-newline port))]))
+    (when (emit-config-emit-cfi? config)
+      (port-write-string port ".cfi_startproc")
+      (port-newline port))
 
-        ;; 后继块
-        (for ([succ (fn-successors fn bb-id)])
-          (emit-block succ)))))
+    ;; 按基本块顺序输出
+    (define entry-id (asm-function-entry fn))
+    (define visited (make-hash))
 
-  (emit-block entry-id)
+    ;; 获取 label 对齐信息
+    (define label-alignments (fn-get-info fn 'label-alignments (hash)))
 
-  (when (emit-config-emit-cfi? config)
-    (port-write-string port ".cfi_endproc")
-    (port-newline port)))
+    ;; BFS 遍历基本块
+    (define (emit-block bb-id)
+      (unless (hash-has-key? visited (bb-id-val bb-id))
+        (hash-set! visited (bb-id-val bb-id) #t)
+        (define block (fn-get-block fn (bb-id-val bb-id)))
+        (when block
+          ;; 标签 (非入口块)
+          (unless (equal? bb-id entry-id)
+            (define label (fn-get-label fn bb-id))
+            (when label
+              ;; 检查 label 是否有对齐要求
+              (define label-align (hash-ref label-alignments label #f))
+              (when label-align
+                (port-write-string port ".p2align ")
+                (port-display port label-align)
+                (port-newline port))
+              ;; 输出局部标签 (L<func>$<label>:)
+              (port-write-string port (make-local-label fn-name label))
+              (port-write-string port ":")
+              (port-newline port)))
+
+          ;; 指令
+          (for ([ins (in-pvector (basic-block-instructions block))])
+            (cond
+              [(ast-ins? ins)
+               ;; 检查是否跳过冗余指令
+               (unless (and (emit-config-skip-redundant-mov? config)
+                            (redundant-instruction? ins))
+                 (emit-instruction/port ins port)
+                 (port-newline port))]
+              [(ast-directive? ins)
+               (when (emit-directive/port ins port)
+                 (port-newline port))]))
+
+          ;; 后继块
+          (for ([succ (fn-successors fn bb-id)])
+            (emit-block succ)))))
+
+    (emit-block entry-id)
+
+    (when (emit-config-emit-cfi? config)
+      (port-write-string port ".cfi_endproc")
+      (port-newline port))))
 
 ;; 返回字符串版本 (兼容)
 (define (emit-function fn)

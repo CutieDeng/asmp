@@ -222,12 +222,12 @@
 ;; ============================================================
 
 (struct builder
-  (cfg current-fn-id current-fn-name current-items next-bb-id)
+  (cfg current-fn-id current-fn-name current-fn-attrs current-items next-bb-id)
   #:transparent)
 
 (define (build-cfg items [source 'unknown])
   (define initial-builder
-    (builder (cfg-empty source) #f #f '() 0))
+    (builder (cfg-empty source) #f #f (hash) '() 0))
 
   (define final-builder
     (for/fold ([b initial-builder])
@@ -239,14 +239,16 @@
 
 (define (process-item b item)
   (match item
-    [(ast-directive 'function name _ _)
+    [(ast-directive 'function name attrs _)
      (define b1 (finalize-current-function b))
      (define cfg (builder-cfg b1))
      (define fn-id (control-flow-graph-next-fn-id cfg))
      (define new-cfg
        (struct-copy control-flow-graph cfg
                     [next-fn-id (add1 fn-id)]))
-     (builder new-cfg fn-id name '() (builder-next-bb-id b1))]
+     ;; attrs 是 hash，保存到 builder 中
+     (define fn-attrs (if (hash? attrs) attrs (hash)))
+     (builder new-cfg fn-id name fn-attrs '() (builder-next-bb-id b1))]
 
     [(ast-directive 'end-function _ _ _)
      (finalize-current-function b)]
@@ -263,12 +265,19 @@
     [else
      (define fn-id (builder-current-fn-id b))
      (define fn-name (builder-current-fn-name b))
+     (define fn-attrs (builder-current-fn-attrs b))
      (define items (reverse (builder-current-items b)))
      (define cfg (builder-cfg b))
      (define start-bb-id (builder-next-bb-id b))
 
-     (define-values (fn next-bb-id)
+     (define-values (fn0 next-bb-id)
        (build-single-function fn-id fn-name items start-bb-id))
+
+     ;; 将函数属性存储到 info 中
+     (define fn
+       (for/fold ([f fn0])
+                 ([(k v) (in-hash fn-attrs)])
+         (fn-set-info f k v)))
 
      (define new-cfg
        (struct-copy control-flow-graph cfg
@@ -279,14 +288,21 @@
                                (control-flow-graph-fn-names cfg)
                                fn-name fn-id)]))
 
-     (builder new-cfg #f #f '() next-bb-id)]))
+     (builder new-cfg #f #f (hash) '() next-bb-id)]))
 
 ;; 构建单个函数
 (define (build-single-function fn-id fn-name items start-bb-id)
-  (define-values (instructions label-positions)
+  (define-values (instructions label-positions label-alignments)
     (collect-instructions-and-labels items))
 
   (define n-instructions (pvector-length instructions))
+
+  ;; 将 label-alignments 转换为 info 条目
+  (define base-info
+    (if (hash-empty? label-alignments)
+        (ordered-map-empty symbol-compare)
+        (ordered-map-set (ordered-map-empty symbol-compare)
+                         'label-alignments label-alignments)))
 
   (cond
     [(= n-instructions 0)
@@ -299,7 +315,7 @@
                     (ordered-map-empty integer-compare)
                     (ordered-map-empty integer-compare)
                     fn-debug-empty
-                    (ordered-map-empty symbol-compare))
+                    base-info)
       start-bb-id)]
     [else
      (define block-starts (compute-block-starts instructions label-positions))
@@ -314,25 +330,50 @@
       (asm-function fn-id fn-name entry g-connected blocks
                     id->label label->id vid->bbid bbid->vid
                     fn-debug-empty
-                    (ordered-map-empty symbol-compare))
+                    base-info)
       next-bb)]))
 
 (define (collect-instructions-and-labels items)
-  (for/fold ([instructions (pvector-empty)]
-             [label-positions (hash)])
-            ([item (in-list items)])
-    (match item
-      [(ast-directive 'label name _ _)
-       (values instructions
-               (hash-set label-positions name (pvector-length instructions)))]
-      [(? ast-ins?)
-       (values (pvector-cons-right instructions item)
-               label-positions)]
-      ;; 保留 save!/load!/weak-mov 指令在指令流中
-      [(ast-directive (or 'save! 'load! 'weak-mov) _ _ _)
-       (values (pvector-cons-right instructions item)
-               label-positions)]
-      [_ (values instructions label-positions)])))
+  ;; 返回: instructions, label-positions, label-alignments
+  ;; label-alignments: hash[symbol -> integer] - label 的对齐要求
+  (define-values (instructions label-positions label-alignments _)
+    (for/fold ([instructions (pvector-empty)]
+               [label-positions (hash)]
+               [label-alignments (hash)]
+               [pending-label #f])  ; 刚刚看到的 label 名称
+              ([item (in-list items)])
+      (match item
+        [(ast-directive 'label name _ _)
+         (values instructions
+                 (hash-set label-positions name (pvector-length instructions))
+                 label-alignments
+                 name)]  ; 记录这个 label
+        ;; align 紧跟在 label 之后 -> 记录 label 的对齐，不加入指令流
+        [(ast-directive 'align #f (list n) _)
+         #:when pending-label
+         (values instructions
+                 label-positions
+                 (hash-set label-alignments pending-label n)
+                 #f)]
+        ;; 普通 align (不在 label 之后) -> 加入指令流
+        [(ast-directive 'align _ _ _)
+         (values (pvector-cons-right instructions item)
+                 label-positions
+                 label-alignments
+                 #f)]
+        [(? ast-ins?)
+         (values (pvector-cons-right instructions item)
+                 label-positions
+                 label-alignments
+                 #f)]
+        ;; 保留 save!/load!/weak-mov 指令在指令流中
+        [(ast-directive (or 'save! 'load! 'weak-mov) _ _ _)
+         (values (pvector-cons-right instructions item)
+                 label-positions
+                 label-alignments
+                 #f)]
+        [_ (values instructions label-positions label-alignments #f)])))
+  (values instructions label-positions label-alignments))
 
 (define (compute-block-starts instructions label-positions)
   (define starts (mutable-set 0))
