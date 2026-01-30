@@ -25,7 +25,8 @@
   allocate-all-registers     ; 多类分配
   merge-alloc-results
   format-alloc-result
-  format-multi-alloc-result)
+  format-multi-alloc-result
+  *trace-allocator*)          ; 性能追踪开关
 
 ;; ============================================================
 ;; 数据结构
@@ -44,33 +45,62 @@
 (struct allocator-state
   (ig precolored simplify-worklist freeze-worklist spill-worklist
    spilled-nodes coalesced-nodes colored-nodes select-stack
+   select-stack-set  ;; 新增：bitset 快速查找栈中元素
    coalesce-map color-map degree move-list worklist-moves
    active-moves coalesced-moves frozen-moves constrained-moves
-   reg-list reg-index k)
+   index-reg reg-index k)  ;; 改用 index-reg (pvector) 替代 reg-list
   #:transparent)
 
 ;; ============================================================
 ;; 主函数
 ;; ============================================================
 
+;; 性能追踪参数
+(define *trace-allocator* (make-parameter #f))
+
 ;; 分配单类干涉图
 (define (allocate-registers ig #:abi [abi arm64-abi])
+  (define trace? (*trace-allocator*))
+  (define t0 (if trace? (current-inexact-milliseconds) 0))
+
   (define state (initialize-allocator ig abi))
+
+  (define t1 (if trace? (current-inexact-milliseconds) 0))
+
+  (define simplify-count 0)
+  (define coalesce-count 0)
+  (define freeze-count 0)
+  (define spill-count 0)
 
   (define final-state
     (let loop ([state state])
       (cond
         [(not (bitset-empty? (allocator-state-simplify-worklist state)))
+         (set! simplify-count (add1 simplify-count))
          (loop (simplify state))]
         [(not (null? (allocator-state-worklist-moves state)))
+         (set! coalesce-count (add1 coalesce-count))
          (loop (coalesce state))]
         [(not (bitset-empty? (allocator-state-freeze-worklist state)))
+         (set! freeze-count (add1 freeze-count))
          (loop (freeze state))]
         [(not (bitset-empty? (allocator-state-spill-worklist state)))
+         (set! spill-count (add1 spill-count))
          (loop (select-spill state))]
         [else state])))
 
+  (define t2 (if trace? (current-inexact-milliseconds) 0))
+
   (define colored-state (assign-colors final-state abi))
+
+  (define t3 (if trace? (current-inexact-milliseconds) 0))
+
+  (when trace?
+    (printf "    [allocator] 初始化: ~a ms\n" (- t1 t0))
+    (printf "    [allocator] 主循环: ~a ms (simplify=~a, coalesce=~a, freeze=~a, spill=~a)\n"
+            (- t2 t1) simplify-count coalesce-count freeze-count spill-count)
+    (printf "    [allocator] 着色:   ~a ms\n" (- t3 t2)))
+
   (build-alloc-result colored-state))
 
 ;; 分配多类干涉图（并行友好）
@@ -125,12 +155,10 @@
   (define k (class-ig-num-colors ig))
   (define class (class-ig-class ig))
 
-  ;; 使用 class-ig-reg-index (已有的 ordered-map)
-  (define reg-list
-    (for/list ([kv (in-ordered-map (class-ig-reg-index ig))])
-      (car kv)))
-
-  (define reg-index (class-ig-reg-index ig))
+  ;; 使用 class-ig-index-reg (pvector) 和 class-ig-reg-index (ordered-map)
+  (define index-reg (class-ig-index-reg ig))  ;; pvector: idx -> reg
+  (define reg-index (class-ig-reg-index ig))  ;; ordered-map: reg -> idx
+  (define n (pvector-length index-reg))
 
   (define-values (degree pre simp freeze spill)
     (for/fold ([deg (ordered-map-empty reg-id-compare)]
@@ -138,7 +166,8 @@
                [simp bitset-empty]
                [freeze bitset-empty]
                [spill bitset-empty])
-              ([reg (in-list reg-list)] [i (in-naturals)])
+              ([i (in-range n)])
+      (define reg (pvector-ref index-reg i))
       (define d (ig-degree ig reg))
       (define new-deg (ordered-map-set deg reg d))
       (cond
@@ -153,8 +182,11 @@
 
   (define initial-colors
     (for/fold ([m (ordered-map-empty reg-id-compare)])
-              ([reg (in-list reg-list)] #:when (reg-id-physical? reg))
-      (ordered-map-set m reg (reg-id-id reg))))
+              ([i (in-range n)])
+      (define reg (pvector-ref index-reg i))
+      (if (reg-id-physical? reg)
+          (ordered-map-set m reg (reg-id-id reg))
+          m)))
 
   (define-values (move-list worklist-moves)
     (let ([ml (ordered-map-empty reg-id-compare)] [wl '()])
@@ -168,10 +200,11 @@
 
   (allocator-state ig pre simp freeze spill
                    bitset-empty bitset-empty bitset-empty '()
+                   bitset-empty  ;; select-stack-set (空)
                    (ordered-map-empty reg-id-compare) initial-colors
                    degree move-list worklist-moves
                    '() '() '() '()
-                   reg-list reg-index k))
+                   index-reg reg-index k))
 
 ;; ============================================================
 ;; Simplify
@@ -180,42 +213,43 @@
 (define (simplify state)
   (define worklist (allocator-state-simplify-worklist state))
   (define i (bitset-min worklist))
-  (define reg (list-ref (allocator-state-reg-list state) i))
+  (define reg (pvector-ref (allocator-state-index-reg state) i))
   (define new-simplify (bitset-remove worklist i))
   (define new-stack (cons reg (allocator-state-select-stack state)))
-  (decrement-degree state reg new-simplify new-stack))
+  (define new-stack-set (bitset-add (allocator-state-select-stack-set state) i))
+  (decrement-degree state reg i new-simplify new-stack new-stack-set))
 
-(define (decrement-degree state removed-reg new-simplify new-stack)
+(define (decrement-degree state removed-reg removed-idx new-simplify new-stack new-stack-set)
   (define ig (allocator-state-ig state))
   (define reg-index (allocator-state-reg-index state))
   (define k (allocator-state-k state))
-  (define neighbors (ig-neighbors ig removed-reg))
+  ;; 使用 bitset 直接获取邻居索引
+  (define neighbor-set (ig-neighbors/bitset ig removed-reg))
 
   (for/fold ([st (struct-copy allocator-state state
                               [simplify-worklist new-simplify]
-                              [select-stack new-stack])])
-            ([neighbor (in-list neighbors)])
-    (define ni (ordered-map-ref reg-index neighbor #f))
-    (when (and ni
-               (not (bitset-member? (allocator-state-precolored st) ni))
-               (not (bitset-member? (allocator-state-coalesced-nodes st) ni))
-               (not (member neighbor (allocator-state-select-stack st))))
-      (define old-degree (ordered-map-ref (allocator-state-degree st) neighbor 0))
-      (define new-degree (max 0 (sub1 old-degree)))
-
-      (define st1 (struct-copy allocator-state st
-                               [degree (ordered-map-set (allocator-state-degree st) neighbor new-degree)]))
-
-      (if (and (= old-degree k) (< new-degree k))
-          (let* ([st2 (struct-copy allocator-state st1
-                                   [spill-worklist (bitset-remove (allocator-state-spill-worklist st1) ni)])])
-            (if (ig-move-related? ig neighbor)
-                (struct-copy allocator-state st2
-                             [freeze-worklist (bitset-add (allocator-state-freeze-worklist st2) ni)])
-                (struct-copy allocator-state st2
-                             [simplify-worklist (bitset-add (allocator-state-simplify-worklist st2) ni)])))
-          st1))
-    st))
+                              [select-stack new-stack]
+                              [select-stack-set new-stack-set])])
+            ([ni (in-bitset neighbor-set)])
+    ;; 使用 bitset 快速检查
+    (if (or (bitset-member? (allocator-state-precolored st) ni)
+            (bitset-member? (allocator-state-coalesced-nodes st) ni)
+            (bitset-member? (allocator-state-select-stack-set st) ni))
+        st
+        (let* ([neighbor (pvector-ref (allocator-state-index-reg st) ni)]
+               [old-degree (ordered-map-ref (allocator-state-degree st) neighbor 0)]
+               [new-degree (max 0 (sub1 old-degree))]
+               [st1 (struct-copy allocator-state st
+                                 [degree (ordered-map-set (allocator-state-degree st) neighbor new-degree)])])
+          (if (and (= old-degree k) (< new-degree k))
+              (let ([st2 (struct-copy allocator-state st1
+                                      [spill-worklist (bitset-remove (allocator-state-spill-worklist st1) ni)])])
+                (if (ig-move-related? ig neighbor)
+                    (struct-copy allocator-state st2
+                                 [freeze-worklist (bitset-add (allocator-state-freeze-worklist st2) ni)])
+                    (struct-copy allocator-state st2
+                                 [simplify-worklist (bitset-add (allocator-state-simplify-worklist st2) ni)])))
+              st1)))))
 
 ;; ============================================================
 ;; Coalesce
@@ -326,7 +360,7 @@
 (define (freeze state)
   (define worklist (allocator-state-freeze-worklist state))
   (define i (bitset-min worklist))
-  (define reg (list-ref (allocator-state-reg-list state) i))
+  (define reg (pvector-ref (allocator-state-index-reg state) i))
 
   (struct-copy allocator-state state
                [freeze-worklist (bitset-remove worklist i)]
@@ -340,23 +374,27 @@
 
 (define (select-spill state)
   (define worklist (allocator-state-spill-worklist state))
-  (define best-reg #f)
+  (define best-idx -1)
   (define best-score -1)
 
+  ;; 直接用索引，避免 reg->idx 的查找
   (for ([i (in-bitset worklist)])
-    (define reg (list-ref (allocator-state-reg-list state) i))
+    (define reg (pvector-ref (allocator-state-index-reg state) i))
     (define degree (ordered-map-ref (allocator-state-degree state) reg 0))
     (when (> degree best-score)
-      (set! best-reg reg)
+      (set! best-idx i)
       (set! best-score degree)))
 
-  (define idx (ordered-map-ref (allocator-state-reg-index state) best-reg))
+  (define best-reg (pvector-ref (allocator-state-index-reg state) best-idx))
   (define st1 (struct-copy allocator-state state
-                           [spill-worklist (bitset-remove worklist idx)]))
+                           [spill-worklist (bitset-remove worklist best-idx)]))
 
-  (decrement-degree st1 best-reg
+  (define new-stack (cons best-reg (allocator-state-select-stack st1)))
+  (define new-stack-set (bitset-add (allocator-state-select-stack-set st1) best-idx))
+
+  (decrement-degree st1 best-reg best-idx
                     (allocator-state-simplify-worklist st1)
-                    (cons best-reg (allocator-state-select-stack st1))))
+                    new-stack new-stack-set))
 
 ;; ============================================================
 ;; Assign Colors
@@ -510,7 +548,7 @@
   (define spilled
     (for/fold ([pv (pvector-empty)])
               ([i (in-bitset (allocator-state-spilled-nodes state))])
-      (pvector-cons-right pv (list-ref (allocator-state-reg-list state) i))))
+      (pvector-cons-right pv (pvector-ref (allocator-state-index-reg state) i))))
 
   (define coalesced
     (for/fold ([m (ordered-map-empty reg-id-compare)])
