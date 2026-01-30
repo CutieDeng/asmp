@@ -1,5 +1,5 @@
 ;; Layer1 索引: mnemonic -> (layer1-classes ...)
-;; 生成命令: racket tool/extract/cache-rebuilder.rkt
+;; 生成命令: racket syntax/gen-cached.rkt
 
 (stp (c2m c2m1))
 (sunpklo (c2))
@@ -678,6 +678,7 @@
 (sminqv (c3))
 (bfminnm (c3 c4))
 (fcvtas (c2))
+(mneg (c3))
 (bfvdot (c1))
 (cpyfptwn (c0m3))
 (suvdot (c1))

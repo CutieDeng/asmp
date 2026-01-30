@@ -19,7 +19,7 @@
          "../../vendor/cutie-ftree/ordered-map.rkt"
          "../../vendor/cutie-ftree/bitset.rkt"
          "../../vendor/cutie-ftree/comparator.rkt"
-         "../../vendor/cutie-ftree/graph.rkt")
+         "../../vendor/cutie-ftree/simple-graph.rkt")
 
 (provide
   ;; 数据结构
@@ -32,10 +32,9 @@
 
   ;; 查询 (class-ig)
   ig-neighbors
+  ig-neighbors/bitset  ; 新增：直接返回 bitset
   ig-degree
   ig-interferes?
-  ig-get-vertex
-  ig-get-reg
   ig-is-precolored?
   ig-get-color
   ig-move-related?
@@ -68,13 +67,11 @@
 ;; 单类干涉图
 (struct class-ig
   (class           ; 'gpr | 'fpr | 'predicate
-   graph           ; cutie-ftree graph
-   reg->vertex     ; ordered-map[reg-id -> vertex-id]
-   vertex->reg     ; ordered-map[vid-val -> reg-id]
+   graph           ; simple-graph (pvector[bitset])
    reg-index       ; ordered-map[reg-id -> integer] (类内索引)
    index-reg       ; pvector[reg-id] (类内)
    precolored      ; bitset - 物理寄存器
-   colors          ; ordered-map[vid-val -> integer]
+   colors          ; ordered-map[class-idx -> integer]
    move-edges      ; pvector[move-edge]
    groups          ; pvector[reg-group]
    live-across-call ; bitset - 跨调用活跃
@@ -160,17 +157,9 @@
       (hash-set! m (car pair) idx)
       m))
 
-  ;; 创建图顶点
-  (define-values (g reg->vertex vertex->reg)
-    (for/fold ([g graph-empty]
-               [r->v (ordered-map-empty reg-id-compare)]
-               [v->r (ordered-map-empty integer-compare)])
-              ([pair (in-list reg-pairs)])
-      (define reg (cdr pair))
-      (define-values (g* vid) (graph-add-vertex g))
-      (values g*
-              (ordered-map-set r->v reg vid)
-              (ordered-map-set v->r (vertex-id-val vid) reg))))
+  ;; 创建空图 (n 个顶点)
+  (define n (length reg-pairs))
+  (define g (simple-graph-create n))
 
   ;; 预着色
   (define-values (precolored colors)
@@ -180,11 +169,9 @@
                [idx (in-naturals)])
       (define reg (cdr pair))
       (if (reg-id-physical? reg)
-          (let* ([vid (ordered-map-ref reg->vertex reg)]
-                 [vid-val (vertex-id-val vid)]
-                 [color (reg-id-id reg)])
+          (let ([color (reg-id-id reg)])
             (values (bitset-add pre idx)
-                    (ordered-map-set col vid-val color)))
+                    (ordered-map-set col idx color)))
           (values pre col))))
 
   ;; 过滤本类的 move 边
@@ -216,21 +203,21 @@
 
   ;; 添加干涉边
   (define g-with-edges
-    (add-class-interference-edges g fn liveness reg->vertex
-                                  class-reg-index global->class class))
+    (add-class-interference-edges g fn liveness class-reg-index
+                                  global->class class))
 
   ;; 添加组内干涉边
   (define g-with-group-edges
-    (add-group-interference-edges g-with-edges class-groups reg->vertex))
+    (add-group-interference-edges g-with-edges class-groups class-reg-index))
 
-  (class-ig class g-with-group-edges reg->vertex vertex->reg
+  (class-ig class g-with-group-edges
             class-reg-index class-index-reg
             precolored colors class-move-edges class-groups
             class-live-across-call num-colors))
 
 ;; 添加类内干涉边
-(define (add-class-interference-edges g fn liveness reg->vertex
-                                       class-reg-index global->class class)
+(define (add-class-interference-edges g fn liveness class-reg-index
+                                       global->class class)
   (define index-reg (fn-liveness-index-reg liveness))
 
   (for/fold ([current-g g])
@@ -259,19 +246,19 @@
                     (set! g g))  ; 跳过非本类
                   (if (not (eq? (reg-id-class def-id) class))
                       g
-                      (let ([def-vid (ordered-map-ref reg->vertex def-id #f)])
-                        (if (not def-vid)
+                      (let ([def-idx (ordered-map-ref class-reg-index def-id #f)])
+                        (if (not def-idx)
                             g
                             (for/fold ([g g])
                                       ([live-idx (in-bitset live)])
                               (define live-reg (pvector-ref index-reg live-idx))
                               (if (not (eq? (reg-id-class live-reg) class))
                                   g
-                                  (let ([live-vid (ordered-map-ref reg->vertex live-reg #f)])
-                                    (if (or (not live-vid)
-                                            (equal? def-vid live-vid))
+                                  (let ([live-class-idx (hash-ref global->class live-idx #f)])
+                                    (if (or (not live-class-idx)
+                                            (= def-idx live-class-idx))
                                         g
-                                        (add-undirected-edge g def-vid live-vid))))))))))
+                                        (add-undirected-edge g def-idx live-class-idx))))))))))
 
               ;; 更新活跃集
               (define live-after-def
@@ -393,7 +380,7 @@
   edges)
 
 ;; 为组内寄存器添加干涉边
-(define (add-group-interference-edges g groups reg->vertex)
+(define (add-group-interference-edges g groups class-reg-index)
   (for/fold ([current-g g])
             ([group (in-pvector groups)])
     (define members (reg-group-members group))
@@ -402,10 +389,10 @@
                 [j (in-range (add1 i) (length members))])
       (define reg-i (list-ref members i))
       (define reg-j (list-ref members j))
-      (define vid-i (ordered-map-ref reg->vertex reg-i #f))
-      (define vid-j (ordered-map-ref reg->vertex reg-j #f))
-      (if (and vid-i vid-j)
-          (add-undirected-edge g vid-i vid-j)
+      (define idx-i (ordered-map-ref class-reg-index reg-i #f))
+      (define idx-j (ordered-map-ref class-reg-index reg-j #f))
+      (if (and idx-i idx-j)
+          (add-undirected-edge g idx-i idx-j)
           g))))
 
 ;; 从 ast-reg 转换为 reg-id
@@ -430,11 +417,9 @@
   (memq mnem '(bl blr)))
 
 (define (add-undirected-edge g v1 v2)
-  (if (graph-has-edge-to? g v1 v2)
+  (if (simple-graph-has-edge? g v1 v2)
       g
-      (let-values ([(g1 _e1) (graph-add-edge g v1 v2)])
-        (let-values ([(g2 _e2) (graph-add-edge g1 v2 v1)])
-          g2))))
+      (simple-graph-add-edge g v1 v2)))
 
 ;; ============================================================
 ;; 查询函数 (class-ig)
@@ -449,35 +434,36 @@
 (define (ig-index-reg ig)
   (class-ig-index-reg ig))
 
+;; 返回邻居列表 (兼容旧 API)
 (define (ig-neighbors ig reg)
-  (define vid (ordered-map-ref (class-ig-reg->vertex ig) reg #f))
-  (if vid
-      (for/list ([succ-vid (in-graph-successors (class-ig-graph ig) vid)])
-        (ordered-map-ref (class-ig-vertex->reg ig) (vertex-id-val succ-vid) #f))
+  (define idx (ordered-map-ref (class-ig-reg-index ig) reg #f))
+  (if idx
+      (for/list ([neighbor-idx (in-simple-graph-neighbors (class-ig-graph ig) idx)])
+        (pvector-ref (class-ig-index-reg ig) neighbor-idx))
       '()))
 
+;; 新增：直接返回邻居 bitset (高效)
+(define (ig-neighbors/bitset ig reg)
+  (define idx (ordered-map-ref (class-ig-reg-index ig) reg #f))
+  (if idx
+      (simple-graph-neighbors (class-ig-graph ig) idx)
+      bitset-empty))
+
 (define (ig-degree ig reg)
-  (define vid (ordered-map-ref (class-ig-reg->vertex ig) reg #f))
-  (if vid (graph-out-degree (class-ig-graph ig) vid) 0))
+  (define idx (ordered-map-ref (class-ig-reg-index ig) reg #f))
+  (if idx (simple-graph-degree (class-ig-graph ig) idx) 0))
 
 (define (ig-interferes? ig reg1 reg2)
-  (define vid1 (ordered-map-ref (class-ig-reg->vertex ig) reg1 #f))
-  (define vid2 (ordered-map-ref (class-ig-reg->vertex ig) reg2 #f))
-  (and vid1 vid2 (graph-has-edge-to? (class-ig-graph ig) vid1 vid2)))
-
-(define (ig-get-vertex ig reg)
-  (ordered-map-ref (class-ig-reg->vertex ig) reg #f))
-
-(define (ig-get-reg ig vid)
-  (define vid-val (if (vertex-id? vid) (vertex-id-val vid) vid))
-  (ordered-map-ref (class-ig-vertex->reg ig) vid-val #f))
+  (define idx1 (ordered-map-ref (class-ig-reg-index ig) reg1 #f))
+  (define idx2 (ordered-map-ref (class-ig-reg-index ig) reg2 #f))
+  (and idx1 idx2 (simple-graph-has-edge? (class-ig-graph ig) idx1 idx2)))
 
 (define (ig-is-precolored? ig reg)
   (reg-id-physical? reg))
 
 (define (ig-get-color ig reg)
-  (define vid (ordered-map-ref (class-ig-reg->vertex ig) reg #f))
-  (and vid (ordered-map-ref (class-ig-colors ig) (vertex-id-val vid) #f)))
+  (define idx (ordered-map-ref (class-ig-reg-index ig) reg #f))
+  (and idx (ordered-map-ref (class-ig-colors ig) idx #f)))
 
 (define (ig-move-related? ig reg)
   (for/or ([edge (in-pvector (class-ig-move-edges ig))])
@@ -526,15 +512,15 @@
   (define (add-line! s) (set! lines (cons s lines)))
 
   (add-line! (format "=== ~a 干涉图 ===" (class-ig-class ig)))
-  (add-line! (format "顶点数: ~a" (graph-vertex-count (class-ig-graph ig))))
-  (add-line! (format "边数: ~a" (quotient (graph-edge-count (class-ig-graph ig)) 2)))
+  (add-line! (format "顶点数: ~a" (simple-graph-vertex-count (class-ig-graph ig))))
+  (add-line! (format "边数: ~a" (simple-graph-edge-count (class-ig-graph ig))))
   (add-line! (format "Move 边数: ~a" (pvector-length (class-ig-move-edges ig))))
   (add-line! (format "寄存器组数: ~a" (pvector-length (class-ig-groups ig))))
   (add-line! (format "可用颜色: ~a" (class-ig-num-colors ig)))
   (add-line! "")
   (add-line! "顶点:")
 
-  (for ([kv (in-ordered-map (class-ig-reg->vertex ig))])
+  (for ([kv (in-ordered-map (class-ig-reg-index ig))])
     (define reg (car kv))
     (define neighbors (ig-neighbors ig reg))
     (define precolored? (reg-id-physical? reg))

@@ -10,6 +10,8 @@
 ;;   Rdn, Zdn = def+use
 ;;   Rt = load→def, store→use
 ;;
+;; 生成命令: racket semantic/gen-use-def.rkt
+;;
 
 (stp () ("Rt2" "Rn" "Rt") ())
 (sunpklo ("Zd") ("Zn") ())

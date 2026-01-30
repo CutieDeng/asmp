@@ -107,11 +107,11 @@
     (when (>= debug-level 2)
       (printf "干涉图:\n")
       (when (mig-gpr mig)
-        (printf "  GPR 顶点: ~a\n" (graph-vertex-count (class-ig-graph (mig-gpr mig)))))
+        (printf "  GPR 顶点: ~a\n" (simple-graph-vertex-count (class-ig-graph (mig-gpr mig)))))
       (when (mig-fpr mig)
-        (printf "  FPR 顶点: ~a\n" (graph-vertex-count (class-ig-graph (mig-fpr mig)))))
+        (printf "  FPR 顶点: ~a\n" (simple-graph-vertex-count (class-ig-graph (mig-fpr mig)))))
       (when (mig-pred mig)
-        (printf "  Predicate 顶点: ~a\n" (graph-vertex-count (class-ig-graph (mig-pred mig))))))
+        (printf "  Predicate 顶点: ~a\n" (simple-graph-vertex-count (class-ig-graph (mig-pred mig))))))
 
     ;; 3. 图着色分配（各类独立分配）
     (define multi-result (allocate-all-registers mig #:abi abi))
@@ -162,5 +162,5 @@
                         spill-slots frame-size iter
                         (save-load-context-errors sl-context))])))
 
-;; 从 graph 模块获取顶点数
-(require "../vendor/cutie-ftree/graph.rkt")
+;; 从 simple-graph 模块获取顶点数
+(require "../vendor/cutie-ftree/simple-graph.rkt")

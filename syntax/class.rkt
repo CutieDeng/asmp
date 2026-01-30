@@ -9,7 +9,6 @@
   ;; 语法大类数据库
   syntax-class-db?
   load-syntax-class-db
-  load-syntax-class-db/default
   lookup-syntax-classes
   all-mnemonics
 
@@ -18,10 +17,7 @@
   has-memory?
   has-post-index?
   get-pre-count
-  get-post-count
-
-  ;; 路径
-  default-class-db-path)
+  get-post-count)
 
 ;; ============================================================
 ;; 语法大类 (Syntax Class)
@@ -113,11 +109,6 @@
 ;; 语法大类数据库
 ;; ============================================================
 
-(require racket/runtime-path)
-
-;; 默认数据库路径 (相对于此文件)
-(define-runtime-path default-class-db-path "data/syntax-class-db.rktd")
-
 ;; 数据库结构: hash[symbol -> (listof symbol)]
 ;; mnemonic -> (list of syntax-classes)
 (define (syntax-class-db? x)
@@ -126,10 +117,6 @@
          (and (symbol? k)
               (list? v)
               (andmap syntax-class? v)))))
-
-;; 从默认路径加载
-(define (load-syntax-class-db/default)
-  (load-syntax-class-db default-class-db-path))
 
 ;; 从 .rktd 文件加载数据库
 ;; 文件格式: 每行一个 (mnemonic (class1 class2 ...))

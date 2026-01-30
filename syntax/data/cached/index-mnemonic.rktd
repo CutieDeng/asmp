@@ -1,5 +1,5 @@
 ;; 助记符索引: mnemonic -> ((encoding-id template constraints) ...)
-;; 生成命令: racket tool/extract/cache-rebuilder.rkt
+;; 生成命令: racket syntax/gen-cached.rkt
 
 (stp
   ("STP_32_ldstpair_post" "WZR, WZR, [SP], SInteger" (("imm7" (imm-range 0 127 1)) ("Rt2" (reg-range 0 31)) ("Rn" (reg-range 0 31)) ("Rt" (reg-range 0 31))))

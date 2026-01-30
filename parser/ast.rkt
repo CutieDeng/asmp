@@ -205,7 +205,19 @@
        [ops (format "(~a ~a)" mnem-str (string-join (map ast->string ops) " "))])]
     [(ast-directive kind name args _)
      (match* (kind name args)
-       [('function n _) (format "(: function ~a)" n)]
+       [('function n attrs)
+        (define attr-str
+          (if (and (hash? attrs) (> (hash-count attrs) 0))
+              (string-join
+               (for/list ([(k v) (in-hash attrs)])
+                 (if (eq? v #t)
+                     (format "(~a)" k)
+                     (format "(~a ~a)" k v)))
+               " ")
+              ""))
+        (if (string=? attr-str "")
+            (format "(: function ~a)" n)
+            (format "(: function ~a ~a)" n attr-str))]
        [('end-function #f _) "(: end-function)"]
        [('label n _) (format "(: label ~a)" n)]
        [('section n _) (format "(: section ~a)" n)]

@@ -197,7 +197,12 @@
      (ast-imm n loc)]
     [(? symbol? sym)
      (or (try-parse-register/loc sym loc)
-         (ast-label sym loc))]))
+         ;; 检查是否看起来像寄存器但解析失败
+         (begin
+           (let ([str (symbol->string sym)])
+             (when (regexp-match? #rx"^[xwzvpbhsdq]\\." str)
+               (error 'parse-register "无效的虚拟寄存器语法: ~a (变量名不能包含 '.')" sym)))
+           (ast-label sym loc)))]))
 
 ;; 判断是否为显式寄存器组
 (define (reglist-sexp? sexp)
@@ -257,9 +262,14 @@
     [_ #f]))
 
 ;; 虚拟寄存器: x.foo, z.vec*4@2.D, p.mask/z
+;; 元素后缀只允许有效值: B, H, S, D, Q (及 NEON 排列如 8B, 4S 等)
+;; GPR (x, w) 不允许元素后缀
 (define (parse-virtual-register str loc)
-  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.([-a-zA-Z0-9]+))?(/([mz]))?$" str)
+  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQ]))?(/([mz]))?$" str)
     [(list _ kind-s name-s _ group-s _ index-s _ elem-s _ pred-s)
+     ;; GPR (x, w) 不应该有元素后缀
+     (when (and elem-s (member kind-s '("x" "w")))
+       (error 'parse-register "GPR 虚拟寄存器不支持元素后缀: ~a" str))
      (ast-reg (string->symbol kind-s)
               (string->symbol name-s)
               (and group-s (string->number group-s))
@@ -430,13 +440,26 @@
 
   (values regs size-spec))
 
+;; 解析函数属性列表
+;; 输入: ((abi aapcs64) (leaf) ...)
+;; 输出: hash[symbol -> any]
+(define (parse-function-attrs attrs)
+  (for/hash ([attr (in-list attrs)])
+    (match attr
+      [(list key value) (values key value)]
+      [(list key) (values key #t)]  ; 无值属性视为 #t
+      [_ (error 'parse-function-attrs "无效属性: ~a" attr)])))
+
 ;; 解析元语法指令
 (define (parse-directive/stx stx)
   (define datum (syntax->datum stx))
   (define loc (syntax->srcloc stx))
   (match datum
-    [(list ': 'function name)
-     (ast-directive 'function name '() loc)]
+    ;; 函数声明：(: function name (attr ...) ...)
+    [(list ': 'function name attrs ...)
+     #:when (symbol? name)
+     (define attr-hash (parse-function-attrs attrs))
+     (ast-directive 'function name attr-hash loc)]
     [(list ': 'end-function)
      (ast-directive 'end-function #f '() loc)]
     [(list ': 'label name)

@@ -15,8 +15,7 @@
          "../../vendor/cutie-ftree/pvector.rkt"
          "../../vendor/cutie-ftree/ordered-map.rkt"
          "../../vendor/cutie-ftree/bitset.rkt"
-         "../../vendor/cutie-ftree/comparator.rkt"
-         "../../vendor/cutie-ftree/graph.rkt")
+         "../../vendor/cutie-ftree/comparator.rkt")
 
 (provide
   (struct-out alloc-result)
@@ -126,14 +125,12 @@
   (define k (class-ig-num-colors ig))
   (define class (class-ig-class ig))
 
+  ;; 使用 class-ig-reg-index (已有的 ordered-map)
   (define reg-list
-    (for/list ([kv (in-ordered-map (class-ig-reg->vertex ig))])
+    (for/list ([kv (in-ordered-map (class-ig-reg-index ig))])
       (car kv)))
 
-  (define reg-index
-    (for/fold ([m (ordered-map-empty reg-id-compare)])
-              ([reg (in-list reg-list)] [i (in-naturals)])
-      (ordered-map-set m reg i)))
+  (define reg-index (class-ig-reg-index ig))
 
   (define-values (degree pre simp freeze spill)
     (for/fold ([deg (ordered-map-empty reg-id-compare)]

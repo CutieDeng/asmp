@@ -1,5 +1,5 @@
 ;; 整合表: mnemonic -> layer1 -> layer2 -> encodings
-;; 生成命令: racket tool/extract/cache-rebuilder.rkt
+;; 生成命令: racket syntax/gen-cached.rkt
 
 (stp
   (c2m1

@@ -30,6 +30,7 @@
          "../semantic/control-flow.rkt"
          "../semantic/save-verify.rkt"
          "../pipeline/pipeline.rkt"
+         "../pipeline/regalloc/abi-config.rkt"
          "../codegen/emit.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
@@ -57,6 +58,7 @@
 ;; 汇编语法
 (define asm-syntax (make-parameter 'gnu))  ; 'gnu | 'apple
 (define emit-cfi (make-parameter #f))
+(define skip-redundant-mov (make-parameter #f))  ; 默认保留所有指令
 
 ;; 寄存器分配
 (define allow-spill (make-parameter #t))
@@ -73,6 +75,7 @@
 ;; 功能开关
 (define skip-validation (make-parameter #f))
 (define verify-save-load-flag (make-parameter #t))
+(define check-outside-function (make-parameter #t))  ; 检查函数外指令
 
 ;; ============================================================
 ;; 阶段定义
@@ -130,6 +133,12 @@
              (format-srcloc loc)
              (parse-error-message err))]
 
+    ;; 语法错误 (解析时抛出异常)
+    [(and err (eq? (parse-error-kind err) 'syntax))
+     (format "~a: 语法错误: ~a"
+             (format-srcloc loc)
+             (parse-error-message err))]
+
     [(and ins validation)
      (define mnem (validation-result-mnemonic validation))
      (define layer (validation-result-error-layer validation))
@@ -178,10 +187,18 @@
                #:when (parse-result-instruction r))
       (parse-result-instruction r)))
 
-  (define errors
+  (define validation-errors
     (for/list ([r (in-list (parse-results-items results))]
                #:when (not (parse-result-ok? r)))
       (format-validation-error r)))
+
+  ;; 检查函数外指令
+  (define outside-function-errors
+    (if (check-outside-function)
+        (check-instructions-outside-function items input-file)
+        '()))
+
+  (define errors (append validation-errors outside-function-errors))
 
   (when (should-dump? 'ast)
     (dump-ast items))
@@ -191,6 +208,33 @@
              (length items) (length errors)))
 
   (parse-stage-result items errors results))
+
+;; 检查函数外的指令
+;; 返回错误消息列表
+(define (check-instructions-outside-function items source)
+  (define errors '())
+  (define in-function? #f)
+
+  (for ([item (in-list items)])
+    (cond
+      ;; 函数开始
+      [(and (ast-directive? item)
+            (eq? (ast-directive-kind item) 'function))
+       (set! in-function? #t)]
+      ;; 函数结束
+      [(and (ast-directive? item)
+            (eq? (ast-directive-kind item) 'end-function))
+       (set! in-function? #f)]
+      ;; 非函数内的指令
+      [(and (ast-ins? item) (not in-function?))
+       (define loc (ast-srcloc item))
+       (define loc-str (format-srcloc loc))
+       (set! errors
+             (cons (format "~a: ~a: 指令在函数定义外"
+                           loc-str (ast->string item))
+                   errors))]))
+
+  (reverse errors))
 
 (define (dump-ast items)
   (displayln ";; === AST Dump ===")
@@ -356,12 +400,15 @@
   (when (>= (verbose-level) 1)
     (eprintf "阶段 4: 代码生成\n"))
 
-  (define config
+  (define base-config
     (case (asm-syntax)
       [(apple) apple-emit-config]
-      [else
-       (struct-copy emit-config default-emit-config
-                    [emit-cfi? (emit-cfi)])]))
+      [else default-emit-config]))
+
+  (define config
+    (struct-copy emit-config base-config
+                 [emit-cfi? (emit-cfi)]
+                 [skip-redundant-mov? (skip-redundant-mov)]))
 
   (define assembly
     (parameterize ([current-emit-config config])
@@ -539,6 +586,10 @@
       "生成 CFI 指令"
       (emit-cfi #t)]
 
+     [("--elim")
+      "消除冗余 mov 指令 (如 mov x0, x0)"
+      (skip-redundant-mov #t)]
+
      ;; 寄存器分配
      [("--no-spill")
       "禁止寄存器溢出 (分配失败则报错)"
@@ -570,6 +621,19 @@
      [("--no-verify-save-load")
       "不验证 save!/load! 配对"
       (verify-save-load-flag #f)]
+
+     [("--allow-outside-function")
+      "允许函数定义外的指令"
+      (check-outside-function #f)]
+
+     ;; ABI 配置
+     [("--default-abi") name
+      "默认 ABI (如 aapcs64, leaf, naked)"
+      (default-abi-name (string->symbol name))]
+
+     [("--abi-config") path
+      "ABI 配置文件路径"
+      (abi-config-path path)]
 
      #:args (input-file)
      input-file))
@@ -610,4 +674,5 @@
  continue-on-error
  show-hints
  skip-validation
- verify-save-load-flag)
+ verify-save-load-flag
+ check-outside-function)
