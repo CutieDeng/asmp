@@ -87,11 +87,15 @@
 ;; 标签/符号
 (struct ast-label (name loc) #:transparent)
 
-;; 移位 (只有种类，amount 是独立的 ast-imm)
-(struct ast-shift (kind loc) #:transparent)
+;; 移位 (kind + 可选的 amount)
+;; 普通指令中 amount 作为独立 ast-imm 跟随
+;; 内存寻址中 amount 存在此字段
+(struct ast-shift (kind amount loc) #:transparent)
 
-;; 扩展 (只有种类，amount 是独立的 ast-imm)
-(struct ast-extend (kind loc) #:transparent)
+;; 扩展 (kind + 可选的 amount)
+;; 普通指令中 amount 作为独立 ast-imm 跟随
+;; 内存寻址中 amount 存在此字段
+(struct ast-extend (kind amount loc) #:transparent)
 
 ;; 条件码
 (struct ast-cond (code loc) #:transparent)
@@ -131,8 +135,8 @@
     [(ast-reg _ _ _ _ _ _ loc) loc]
     [(ast-imm _ loc) loc]
     [(ast-label _ loc) loc]
-    [(ast-shift _ loc) loc]
-    [(ast-extend _ loc) loc]
+    [(ast-shift _ _ loc) loc]
+    [(ast-extend _ _ loc) loc]
     [(ast-cond _ loc) loc]
     [(ast-mem _ _ _ _ _ loc) loc]
     [(ast-reglist _ loc) loc]
@@ -178,8 +182,14 @@
     [(ast-reg _ _ _ _ _ _ _) (ast-reg->string node)]
     [(ast-imm v _) (format "#~a" v)]
     [(ast-label name _) (symbol->string name)]
-    [(ast-shift kind _) (symbol->string kind)]
-    [(ast-extend kind _) (symbol->string kind)]
+    [(ast-shift kind amount _)
+     (if amount
+         (format "~a #~a" (symbol->string kind) amount)
+         (symbol->string kind))]
+    [(ast-extend kind amount _)
+     (if amount
+         (format "~a #~a" (symbol->string kind) amount)
+         (symbol->string kind))]
     [(ast-cond code _) (symbol->string code)]
     [(ast-mem base offset index-mode shift extend _)
      (define inner-parts

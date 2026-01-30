@@ -128,6 +128,29 @@ racket test/parser-test.rkt
 (: end-function)
 ```
 
+### 函数属性
+
+函数声明支持在 `(: function name ...)` 后添加属性：
+
+```lisp
+(: function my_func (abi aapcs64) (attr1) (attr2 value))
+```
+
+**已实现的属性：**
+
+| 属性 | 说明 |
+|------|------|
+| `(abi <name>)` | 指定调用约定：`aapcs64`、`leaf`、`naked` |
+
+**未实现的属性（仅解析，无实际功能）：**
+
+解析器允许任意属性语法，但以下属性**当前未实现**，会被静默忽略：
+
+- `(inline)` - 无内联优化功能
+- `(noinline)` - 无效果
+
+这些属性作为语法预留存在，未来版本可能实现。
+
 ### 虚拟寄存器
 
 ```lisp

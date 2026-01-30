@@ -178,12 +178,18 @@
      (port-display port name)]
 
     ;; 移位
-    [(ast-shift kind _)
-     (port-write-string port (string-upcase (symbol->string kind)))]
+    [(ast-shift kind amount _)
+     (port-write-string port (string-upcase (symbol->string kind)))
+     (when amount
+       (port-write-string port " #")
+       (port-display port amount))]
 
     ;; 扩展
-    [(ast-extend kind _)
-     (port-write-string port (string-upcase (symbol->string kind)))]
+    [(ast-extend kind amount _)
+     (port-write-string port (string-upcase (symbol->string kind)))
+     (when amount
+       (port-write-string port " #")
+       (port-display port amount))]
 
     ;; 条件码
     [(ast-cond code _)

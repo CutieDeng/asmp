@@ -222,9 +222,9 @@
       [(list 'const val)
        (cond
          [(memq val '(lsl lsr asr ror))
-          (ast-shift val loc)]
+          (ast-shift val #f loc)]
          [(memq val '(uxtb uxth uxtw uxtx sxtb sxth sxtw sxtx))
-          (ast-extend val loc)]
+          (ast-extend val #f loc)]
          [(number? val)
           (ast-imm val loc)]
          [else

@@ -106,21 +106,21 @@
     ['() '()]
     ;; shift + amount
     [(cons (? shift-keyword? kw) (cons (? number? amt) rest))
-     (cons (ast-shift kw no-srcloc)
+     (cons (ast-shift kw #f no-srcloc)
            (cons (ast-imm amt no-srcloc)
                  (parse-operand-list rest)))]
     ;; shift only
     [(cons (? shift-keyword? kw) rest)
-     (cons (ast-shift kw no-srcloc)
+     (cons (ast-shift kw #f no-srcloc)
            (parse-operand-list rest))]
     ;; extend + amount
     [(cons (? extend-keyword? kw) (cons (? number? amt) rest))
-     (cons (ast-extend kw no-srcloc)
+     (cons (ast-extend kw #f no-srcloc)
            (cons (ast-imm amt no-srcloc)
                  (parse-operand-list rest)))]
     ;; extend only
     [(cons (? extend-keyword? kw) rest)
-     (cons (ast-extend kw no-srcloc)
+     (cons (ast-extend kw #f no-srcloc)
            (parse-operand-list rest))]
     ;; 其他
     [(cons item rest)
@@ -137,22 +137,22 @@
        ;; shift + amount
        [((? shift-keyword? kw) (cons amt-stx rest2))
         #:when (number? (syntax->datum amt-stx))
-        (cons (ast-shift kw loc)
+        (cons (ast-shift kw #f loc)
               (cons (ast-imm (syntax->datum amt-stx) (syntax->srcloc amt-stx))
                     (parse-operand-list/stx rest2)))]
        ;; shift only
        [((? shift-keyword? kw) _)
-        (cons (ast-shift kw loc)
+        (cons (ast-shift kw #f loc)
               (parse-operand-list/stx rest))]
        ;; extend + amount
        [((? extend-keyword? kw) (cons amt-stx rest2))
         #:when (number? (syntax->datum amt-stx))
-        (cons (ast-extend kw loc)
+        (cons (ast-extend kw #f loc)
               (cons (ast-imm (syntax->datum amt-stx) (syntax->srcloc amt-stx))
                     (parse-operand-list/stx rest2)))]
        ;; extend only
        [((? extend-keyword? kw) _)
-        (cons (ast-extend kw loc)
+        (cons (ast-extend kw #f loc)
               (parse-operand-list/stx rest))]
        ;; 其他
        [(_ _)
@@ -295,10 +295,10 @@
   (ast-imm n no-srcloc))
 
 (define (parse-shift kind)
-  (ast-shift kind no-srcloc))
+  (ast-shift kind #f no-srcloc))
 
 (define (parse-extend kind)
-  (ast-extend kind no-srcloc))
+  (ast-extend kind #f no-srcloc))
 
 ;; ============================================================
 ;; 内存寻址解析
@@ -322,19 +322,19 @@
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'pre
-              (ast-shift sk no-srcloc)
+              (ast-shift sk amt no-srcloc)
               #f loc)]
     ;; Pre-index with extend: (base reg extend !) 或 (base reg extend amount !)
     [(list base-sym reg-sym (? extend-keyword? ek) '!)
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'pre #f
-              (ast-extend ek no-srcloc) loc)]
-    [(list base-sym reg-sym (? extend-keyword? ek) (? number?) '!)
+              (ast-extend ek #f no-srcloc) loc)]
+    [(list base-sym reg-sym (? extend-keyword? ek) (? number? amt) '!)
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'pre #f
-              (ast-extend ek no-srcloc) loc)]
+              (ast-extend ek amt no-srcloc) loc)]
     ;; Simple: (base)
     [(list base-sym)
      (ast-mem (parse-register base-sym) #f 'offset #f #f loc)]
@@ -348,19 +348,19 @@
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'offset
-              (ast-shift sk no-srcloc)
+              (ast-shift sk amt no-srcloc)
               #f loc)]
     ;; Register offset with extend: (base reg extend) 或 (base reg extend amount)
     [(list base-sym reg-sym (? extend-keyword? ek))
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'offset #f
-              (ast-extend ek no-srcloc) loc)]
-    [(list base-sym reg-sym (? extend-keyword? ek) (? number?))
+              (ast-extend ek #f no-srcloc) loc)]
+    [(list base-sym reg-sym (? extend-keyword? ek) (? number? amt))
      (ast-mem (parse-register base-sym)
               (parse-register reg-sym)
               'offset #f
-              (ast-extend ek no-srcloc) loc)]))
+              (ast-extend ek amt no-srcloc) loc)]))
 
 (define (parse-offset sexp)
   (match sexp

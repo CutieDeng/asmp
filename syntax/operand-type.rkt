@@ -260,10 +260,10 @@
     [(ast-label _ _) 'label]
 
     ;; 移位
-    [(ast-shift _ _) 'keyword]
+    [(ast-shift _ _ _) 'keyword]
 
     ;; 扩展
-    [(ast-extend _ _) 'keyword]
+    [(ast-extend _ _ _) 'keyword]
 
     ;; 条件码
     [(ast-cond _ _) 'cond-code]
