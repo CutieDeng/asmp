@@ -7,6 +7,8 @@
 ;; ============================================================
 
 (require "../syntax/extract/syntax-variant.rkt"
+         "../syntax/diagnose.rkt"
+         "../syntax/variant.rkt"
          "../parser/parser.rkt"
          "../syntax/main.rkt")
 

@@ -99,7 +99,7 @@ instruction-spec.rktd (核心)
 
 ```bash
 # 生成 instruction-spec.rktd (唯一核心文件)
-racket tool/extract/instruction-spec-extractor.rkt
+racket syntax/gen-instruction-spec.rkt
 
 # 可选参数:
 #   -j <path>  指定 Instructions.json 路径
@@ -110,7 +110,7 @@ racket tool/extract/instruction-spec-extractor.rkt
 
 ```bash
 # 从 instruction-spec.rktd 重建所有缓存
-racket tool/extract/cache-rebuilder.rkt
+racket syntax/gen-cached.rkt
 
 # 可选参数:
 #   -s <path>  指定 instruction-spec.rktd 路径
@@ -121,10 +121,10 @@ racket tool/extract/cache-rebuilder.rkt
 
 ```bash
 # 1. 从 MRS JSON 提取核心数据
-racket tool/extract/instruction-spec-extractor.rkt
+racket syntax/gen-instruction-spec.rkt
 
 # 2. 重建所有缓存
-racket tool/extract/cache-rebuilder.rkt
+racket syntax/gen-cached.rkt
 ```
 
 ## Layer 计算规则

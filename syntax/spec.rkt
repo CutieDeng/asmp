@@ -50,7 +50,6 @@
 (define layer1-index-path (build-path cached-dir "index-layer1.rktd"))
 (define layer2-index-path (build-path cached-dir "index-layer2.rktd"))
 (define integrated-path (build-path cached-dir "integrated-table.rktd"))
-(define constraint-db-path (build-path data-root "instruction-constraints.rktd"))
 
 ;; ============================================================
 ;; Level 2: 内存缓存
@@ -132,25 +131,22 @@
                   (build-integrated-from-spec))))
   (unbox *integrated-table*))
 
-;; 获取约束数据库
+;; 获取约束数据库 (从 instruction-spec.rktd 提取)
 ;; 格式: hash[encoding-id -> hash[field-name -> constraint]]
 (define (get-constraint-db)
   (unless (unbox *constraint-db*)
-    (set-box! *constraint-db*
-              (if (file-exists? constraint-db-path)
-                  (load-constraint-db constraint-db-path)
-                  (make-hash))))
+    (set-box! *constraint-db* (build-constraint-db-from-spec)))
   (unbox *constraint-db*))
 
-;; 加载约束数据库
-(define (load-constraint-db path)
+;; 从 instruction-spec.rktd 构建约束数据库
+(define (build-constraint-db-from-spec)
   (define h (make-hash))
-  (for ([item (load-sexp-file path)])
-    (match item
-      [(list enc-id fields)
+  (for ([spec (get-spec-db)])
+    (match spec
+      [(list enc-id mnem template constraints)
        (define field-hash (make-hash))
-       (for ([f (in-list fields)])
-         (match f
+       (for ([c (in-list constraints)])
+         (match c
            [(list field-name constraint-sexp)
             (define constraint (sexp->constraint constraint-sexp))
             (when constraint

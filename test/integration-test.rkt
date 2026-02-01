@@ -425,7 +425,50 @@
       (define asm (compile-to-asm source))
       ;; 如果完全合并，应该只有 mov x0, #1
       (check-true (<= (count-instructions asm "mov") 2)
-                  "冗余 mov 应被消除")))))
+                  "冗余 mov 应被消除")))
+
+   ;; --------------------------------------------------------
+   ;; 语义检查测试
+   ;; --------------------------------------------------------
+   (test-suite
+    "语义检查"
+
+    (test-case "跨寄存器类别同名虚拟变量检测"
+      ;; z.result (FPR) 和 p.result (predicate) 共享名称 "result"
+      ;; 这是禁止的，因为会导致语义混乱
+      (define source "
+(: function cross_class_conflict)
+(: label entry)
+  (mov z.result z0)
+  (mov p.result p0)
+  (ret)
+(: end-function)
+")
+      (check-exn
+       (lambda (e)
+         (and (exn:fail? e)
+              (regexp-match? #rx"跨寄存器类别" (exn-message e))
+              (regexp-match? #rx"result" (exn-message e))
+              (regexp-match? #rx"SVE 向量寄存器" (exn-message e))
+              (regexp-match? #rx"SVE 谓词寄存器" (exn-message e))))
+       (lambda () (compile-to-asm source))
+       "应检测到跨寄存器类别的同名虚拟变量"))
+
+    (test-case "SVE 谓词寄存器编译"
+      ;; 测试 SVE 谓词寄存器的正确编译
+      (define source "
+(: function sve_predicate_test)
+(: label entry)
+  (mov p.mask p0)
+  (mov p1 p.mask)
+  (ret)
+(: end-function)
+")
+      (define asm (compile-to-asm source))
+      (check-true (string? asm) "SVE 谓词寄存器应成功编译")
+      ;; 不应包含虚拟谓词寄存器
+      (check-pred (lambda (s) (asm-not-contains? s "p\\.")) asm
+                  "不应包含虚拟谓词寄存器")))))
 
 ;; ============================================================
 ;; 运行测试

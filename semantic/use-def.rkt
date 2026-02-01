@@ -270,6 +270,11 @@
      #:when (memq kind '(v d s h b q z))
      (list (reg-ref kind id 'direct))]
 
+    ;; 谓词寄存器 (SVE predicate)
+    [(ast-reg kind id _ _ _ _ _)
+     #:when (eq? kind 'p)
+     (list (reg-ref kind id 'direct))]
+
     ;; 内存操作数
     [(? ast-mem?)
      (extract-regs-from-memory op 'use)]

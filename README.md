@@ -26,6 +26,38 @@ cd multiavl
 
 无需额外安装依赖，所有必要的库已包含在 `vendor/` 目录中。
 
+### 预编译（推荐）
+
+首次运行前预编译可大幅提升启动速度：
+
+```bash
+# 编译主入口及其所有依赖
+raco make cli/as.rkt
+```
+
+预编译后运行时间从数秒降至约 0.4 秒。
+
+### 打包可执行文件
+
+```bash
+# 创建独立可执行文件
+raco exe -o multiavl-as cli/as.rkt
+
+# 运行
+./multiavl-as examples/01-basic.lisp
+```
+
+### 创建可分发包
+
+生成可在无 Racket 环境的机器上运行的分发包：
+
+```bash
+raco exe -o multiavl-as cli/as.rkt
+raco distribute dist/ multiavl-as
+```
+
+生成的 `dist/` 目录包含所有依赖，可直接复制到目标机器运行。
+
 ## 使用方法
 
 ### 基本用法

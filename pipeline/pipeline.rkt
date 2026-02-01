@@ -13,6 +13,7 @@
          "regalloc/spill-config.rkt"
          "regalloc/save-load.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/validate.rkt"
          "../vendor/cutie-ftree/pvector.rkt")
 
 (provide
@@ -27,6 +28,9 @@
 
   ;; 流水线结果
   (struct-out pipeline-result)
+
+  ;; 重导出语义验证
+  (all-from-out "../semantic/validate.rkt")
 
   ;; 重导出寄存器分配相关
   (all-from-out "regalloc/types.rkt")
@@ -83,6 +87,9 @@
   (run-regalloc-pipeline fn config))
 
 (define (run-regalloc-pipeline fn [config default-pipeline-config])
+  ;; 0. 前端语义验证
+  (validate-function fn)
+
   (define abi (pipeline-config-abi config))
   (define spill-cfg (pipeline-config-spill config))
   (define max-iters (pipeline-config-max-iters config))
