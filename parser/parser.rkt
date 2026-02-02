@@ -183,10 +183,31 @@
     ;; 立即数
     [(? number? n)
      (ast-imm n no-srcloc)]
-    ;; 符号
+    ;; 符号 (可能带 @RELOC 修饰符)
     [(? symbol? sym)
      (or (try-parse-register sym)
-         (ast-label sym no-srcloc))]))
+         (parse-label-with-reloc sym no-srcloc))]))
+
+;; 解析可能带 relocation 修饰符的标签
+;; 支持: name, name@PAGE, name@PAGEOFF, name@GOTPAGE, name@GOTPAGEOFF
+(define (parse-label-with-reloc sym loc)
+  (define str (symbol->string sym))
+  (define match-result (regexp-match #rx"^(.+)@(PAGE|PAGEOFF|GOTPAGE|GOTPAGEOFF)$" str))
+  (cond
+    [match-result
+     (define name (string->symbol (cadr match-result)))
+     (define reloc (string->symbol (caddr match-result)))
+     (ast-label name reloc loc)]
+    ;; 检查错误的 @ 用法
+    [(regexp-match? #rx"@" str)
+     (define parts (regexp-match #rx"^(.+)@(.*)$" str))
+     (if parts
+         (error 'parse-label
+                "未知的 relocation 修饰符: @~a (支持: @PAGE, @PAGEOFF, @GOTPAGE, @GOTPAGEOFF)"
+                (caddr parts))
+         (error 'parse-label "无效的 @ 语法: ~a" sym))]
+    [else
+     (ast-label sym #f loc)]))
 
 (define (parse-operand/stx stx)
   (define sexp (syntax->datum stx))
@@ -204,9 +225,19 @@
          ;; 检查是否看起来像寄存器但解析失败
          (begin
            (let ([str (symbol->string sym)])
-             (when (regexp-match? #rx"^[xwzvpbhsdq]\\." str)
-               (error 'parse-register "无效的虚拟寄存器语法: ~a (变量名不能包含 '.')" sym)))
-           (ast-label sym loc)))]))
+             (when (and (regexp-match? #rx"^[xwzvpbhsdq]\\." str)
+                        (not (regexp-match? #rx"@" str)))  ; 排除 reloc 情况
+               ;; 提供更具体的错误信息
+               (define hint
+                 (cond
+                   ;; 检查是否是元素后缀问题
+                   [(regexp-match #rx"^[xwzvpbhsdq]\\.[^.]+\\.(.+)$" str)
+                    => (lambda (m)
+                         (format "无效的元素后缀 '.~a'，有效后缀: B/H/S/D/Q 或 4S/8B/16B 等" (cadr m)))]
+                   ;; 其他情况
+                   [else "格式应为 'v.name' 或 'v.name.4s'"]))
+               (error 'parse-register "无效的虚拟寄存器: ~a (~a)" sym hint)))
+           (parse-label-with-reloc sym loc)))]))
 
 ;; 判断是否为显式寄存器组
 ;; 支持单个或多个向量寄存器: {z0.B} 或 {z0.B z1.B}
@@ -266,11 +297,11 @@
               loc)]
     [_ #f]))
 
-;; 虚拟寄存器: x.foo, z.vec*4@2.D, p.mask/z
-;; 元素后缀只允许有效值: B, H, S, D, Q (及 NEON 排列如 8B, 4S 等)
+;; 虚拟寄存器: x.foo, z.vec*4@2.D, v.name.4s, p.mask/z
+;; 元素后缀严格匹配: B, H, S, D, Q 及 NEON 排列 (8B, 4S, 16b 等，大小写均可)
 ;; GPR (x, w) 不允许元素后缀
 (define (parse-virtual-register str loc)
-  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQ]))?(/([mz]))?$" str)
+  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQbhsdq]))?(/([mz]))?$" str)
     [(list _ kind-s name-s _ group-s _ index-s _ elem-s _ pred-s)
      ;; GPR (x, w) 不应该有元素后缀
      (when (and elem-s (member kind-s '("x" "w")))
@@ -370,7 +401,10 @@
 (define (parse-offset sexp)
   (match sexp
     [(? number? n) (ast-imm n no-srcloc)]
-    [(? symbol? sym) (parse-register sym)]))
+    [(? symbol? sym)
+     ;; 优先尝试解析为寄存器，失败则解析为标签
+     (or (try-parse-register sym)
+         (parse-label-with-reloc sym no-srcloc))]))
 
 ;; ============================================================
 ;; 寄存器组解析
@@ -475,6 +509,10 @@
      (ast-directive 'align #f (list n) loc)]
     [(list ': 'global name)
      (ast-directive 'global name '() loc)]
+    [(list ': 'extern name)
+     (ast-directive 'extern name '(func) loc)]
+    [(list ': 'extern name '(var))
+     (ast-directive 'extern name '(var) loc)]
     ;; save!/load! 指令
     ;; 语法: (: save! reg ... [size-spec])
     ;;       (: load! reg ... [size-spec])

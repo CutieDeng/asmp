@@ -26,6 +26,10 @@
          (ast-directive 'end-function #f '() no-srcloc)]
         [(list ': 'label name)
          (ast-directive 'label name '() no-srcloc)]
+        [(list ': 'extern name)
+         (ast-directive 'extern name '(func) no-srcloc)]
+        [(list ': 'extern name '(var))
+         (ast-directive 'extern name '(var) no-srcloc)]
         [_ (parse-instruction item)])))
 
   (test-case "verify-label-references 正确的局部标签引用"
@@ -94,4 +98,57 @@
     (define errors (verify-label-references fn cfg))
     (check-equal? (pvector-length errors) 1)
     (define err (pvector-ref errors 0))
-    (check-not-false (member 'valid (label-ref-error-defined-labels err)))))
+    (check-not-false (member 'valid (label-ref-error-defined-labels err))))
+
+  (test-case "verify-label-references extern 符号引用合法"
+    (define items (parse-items
+                   '((: extern printf)
+                     (: function test)
+                     (bl printf)
+                     (ret)
+                     (: end-function))))
+    (define cfg (build-test-cfg items))
+    (define fn (cfg-get-function cfg 0))
+    (define errors (verify-label-references fn cfg))
+    (check-true (pvector-empty? errors)))
+
+  (test-case "verify-label-references 多个 extern 符号"
+    (define items (parse-items
+                   '((: extern malloc)
+                     (: extern free)
+                     (: function test)
+                     (bl malloc)
+                     (bl free)
+                     (ret)
+                     (: end-function))))
+    (define cfg (build-test-cfg items))
+    (define fn (cfg-get-function cfg 0))
+    (define errors (verify-label-references fn cfg))
+    (check-true (pvector-empty? errors)))
+
+  (test-case "verify-label-references 未声明的外部符号报错"
+    (define items (parse-items
+                   '((: extern malloc)
+                     (: function test)
+                     (bl malloc)
+                     (bl free)  ; free 未声明
+                     (ret)
+                     (: end-function))))
+    (define cfg (build-test-cfg items))
+    (define fn (cfg-get-function cfg 0))
+    (define errors (verify-label-references fn cfg))
+    (check-equal? (pvector-length errors) 1)
+    (define err (pvector-ref errors 0))
+    (check-equal? (label-ref-error-label err) 'free))
+
+  (test-case "verify-label-references extern 变量声明"
+    (define items (parse-items
+                   '((: extern errno (var))
+                     (: function test)
+                     (adrp x0 errno)
+                     (ret)
+                     (: end-function))))
+    (define cfg (build-test-cfg items))
+    (define fn (cfg-get-function cfg 0))
+    (define errors (verify-label-references fn cfg))
+    (check-true (pvector-empty? errors))))

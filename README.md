@@ -44,7 +44,7 @@ raco make cli/as.rkt
 raco exe -o multiavl-as cli/as.rkt
 
 # 运行
-./multiavl-as examples/01-basic.lisp
+./multiavl-as example/001-basic.d
 ```
 
 ### 创建可分发包
@@ -64,13 +64,13 @@ raco distribute dist/ multiavl-as
 
 ```bash
 # 编译并输出到标准输出
-racket cli/as.rkt examples/01-basic.lisp
+racket cli/as.rkt example/001-basic.d
 
 # 编译到文件
-racket cli/as.rkt -o output.s examples/01-basic.lisp
+racket cli/as.rkt -o output.s example/001-basic.d
 
 # 详细输出模式
-racket cli/as.rkt -v examples/01-basic.lisp
+racket cli/as.rkt -v example/001-basic.d
 ```
 
 ### 命令行选项
@@ -231,7 +231,7 @@ multiavl/
 ├── codegen/                # 代码生成
 │   └── emit.rkt            # ARM64 汇编输出
 ├── encode/                 # 指令编码
-├── examples/               # 示例代码
+├── example/               # 示例代码
 ├── test/                   # 测试用例
 └── vendor/                 # 依赖库
     └── cutie-ftree/        # 持久化数据结构
@@ -240,7 +240,7 @@ multiavl/
 ## 编译管线
 
 ```
-源文件 (.lisp)
+源文件 (.d)
     ↓
 1. PARSE      - S-expression → AST
     ↓
@@ -265,12 +265,12 @@ multiavl/
 
 | 文件 | 说明 | 运行命令 |
 |------|------|----------|
-| `examples/01-basic.lisp` | 基本算术、立即数、位操作 | `racket cli/as.rkt examples/01-basic.lisp` |
-| `examples/02-memory.lisp` | 内存加载/存储寻址模式 | `racket cli/as.rkt examples/02-memory.lisp` |
-| `examples/03-branch.lisp` | 条件分支和循环 | `racket cli/as.rkt --no-verify-save-load examples/03-branch.lisp` |
-| `examples/04-function.lisp` | 函数调用约定 | `racket cli/as.rkt --no-verify-save-load examples/04-function.lisp` |
-| `examples/05-virtual-reg.lisp` | 虚拟寄存器和分配 | `racket cli/as.rkt --no-verify-save-load examples/05-virtual-reg.lisp` |
-| `examples/06-abi.lisp` | ABI 声明 | `racket cli/as.rkt --default-abi aapcs64 examples/06-abi.lisp` |
+| `example/001-basic.d` | 基本算术、立即数、位操作 | `racket cli/as.rkt example/001-basic.d` |
+| `example/002-memory.d` | 内存加载/存储寻址模式 | `racket cli/as.rkt example/002-memory.d` |
+| `example/003-branch.d` | 条件分支和循环 | `racket cli/as.rkt --no-verify-save-load example/003-branch.d` |
+| `example/005-function.d` | 函数调用约定 | `racket cli/as.rkt --no-verify-save-load example/005-function.d` |
+| `example/006-virtual-reg.d` | 虚拟寄存器和分配 | `racket cli/as.rkt --no-verify-save-load example/006-virtual-reg.d` |
+| `example/007-abi.d` | ABI 声明 | `racket cli/as.rkt --default-abi aapcs64 example/007-abi.d` |
 
 ## License
 

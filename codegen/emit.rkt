@@ -199,9 +199,10 @@
      (port-display port v)]
 
     ;; 标签引用
-    [(ast-label name _)
+    [(ast-label name reloc _)
      (define fn-name (current-function-name))
      (define local-labels (current-function-labels))
+     ;; 输出基础标签名
      (cond
        ;; 被合并的标签 -> 输出函数名
        [(set-member? (merged-labels) name)
@@ -217,7 +218,11 @@
         (define prefix (emit-config-label-prefix (current-emit-config)))
         (unless (string=? prefix "")
           (port-write-string port prefix))
-        (port-display port name)])]
+        (port-display port name)])
+     ;; 输出 relocation 修饰符
+     (when reloc
+       (port-write-string port "@")
+       (port-display port reloc))]
 
     ;; 移位
     [(ast-shift kind amount _)

@@ -368,8 +368,10 @@
         (format "(~a ...)" base-str)])]
 
     ;; 标签
-    [(ast-label name _)
-     (symbol->string name)]
+    [(ast-label name reloc _)
+     (if reloc
+         (format "~a@~a" name reloc)
+         (symbol->string name))]
 
     ;; 移位
     [(ast-shift type amount _)

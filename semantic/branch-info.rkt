@@ -207,7 +207,7 @@
             ;; B/BL label - 第一个操作数是标签
             [#f (and (pair? operands) (car operands))]))
         (match label-operand
-          [(ast-label name _) (target-info 'label name)]
+          [(ast-label name _ _) (target-info 'label name)]
           [_ #f])]
 
        [else #f])]

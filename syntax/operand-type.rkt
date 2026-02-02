@@ -277,7 +277,7 @@
      (if (< value 0) 'negimm 'immediate)]
 
     ;; 标签
-    [(ast-label _ _) 'label]
+    [(ast-label _ _ _) 'label]
 
     ;; 移位
     [(ast-shift _ _ _) 'keyword]

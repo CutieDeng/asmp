@@ -268,6 +268,20 @@
     [(ast-directive 'end-function _ _ _)
      (finalize-current-function b)]
 
+    [(ast-directive 'extern name args _)
+     ;; 将 extern 符号添加到 CFG 的 info 中
+     ;; args: '(func) 表示函数，'(var) 表示变量
+     (define cfg (builder-cfg b))
+     (define kind (if (equal? args '(var)) 'var 'func))
+     (define extern-syms (cfg-get-info cfg 'extern-symbols (set)))
+     (define extern-vars (cfg-get-info cfg 'extern-vars (set)))
+     (define new-cfg
+       (if (eq? kind 'var)
+           (cfg-set-info (cfg-set-info cfg 'extern-symbols (set-add extern-syms name))
+                         'extern-vars (set-add extern-vars name))
+           (cfg-set-info cfg 'extern-symbols (set-add extern-syms name))))
+     (struct-copy builder b [cfg new-cfg])]
+
     [_
      (if (builder-current-fn-id b)
          (struct-copy builder b
@@ -772,8 +786,11 @@
     (for/set ([kv (in-ordered-map (control-flow-graph-fn-names cfg))])
       (car kv)))
 
-  ;; 有效的标签 = 本地标签 + 外部函数名
-  (define valid-labels (set-union local-labels external-symbols))
+  ;; 收集声明的 extern 符号
+  (define extern-symbols (cfg-get-info cfg 'extern-symbols (set)))
+
+  ;; 有效的标签 = 本地标签 + 外部函数名 + extern 符号
+  (define valid-labels (set-union local-labels external-symbols extern-symbols))
 
   ;; 遍历所有指令，检查标签引用
   (define errors (box (pvector-empty)))

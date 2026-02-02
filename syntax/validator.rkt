@@ -265,7 +265,7 @@
          [(number? val)
           (ast-imm val loc)]
          [else
-          (ast-label (symbol->string val) loc)])]
+          (ast-label (symbol->string val) #f loc)])]
       [_ (ast-imm 0 loc)])))
 
 ;; ============================================================

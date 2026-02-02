@@ -24,6 +24,7 @@
   cond-code/c
   index-mode/c
   pred-mode/c
+  reloc-kind/c
   directive-kind/c
 
   ;; 工具函数
@@ -65,7 +66,8 @@
                           'vs 'vc 'hi 'ls 'ge 'lt 'gt 'le 'al 'nv))
 (define index-mode/c (or/c 'offset 'pre 'post))
 (define pred-mode/c (or/c #f 'm 'z))
-(define directive-kind/c (or/c 'function 'end-function 'label 'section 'align 'global))
+(define reloc-kind/c (or/c #f 'PAGE 'PAGEOFF 'GOTPAGE 'GOTPAGEOFF))
+(define directive-kind/c (or/c 'function 'end-function 'label 'section 'align 'global 'extern))
 
 ;; ============================================================
 ;; AST 结构 (所有节点携带 srcloc)
@@ -84,8 +86,9 @@
 ;; 立即数
 (struct ast-imm (value loc) #:transparent)
 
-;; 标签/符号
-(struct ast-label (name loc) #:transparent)
+;; 标签/符号 (可带 relocation 修饰符)
+;; reloc: #f | 'PAGE | 'PAGEOFF | 'GOTPAGE | 'GOTPAGEOFF
+(struct ast-label (name reloc loc) #:transparent)
 
 ;; 移位 (kind + 可选的 amount)
 ;; 普通指令中 amount 作为独立 ast-imm 跟随
@@ -134,7 +137,7 @@
   (match node
     [(ast-reg _ _ _ _ _ _ loc) loc]
     [(ast-imm _ loc) loc]
-    [(ast-label _ loc) loc]
+    [(ast-label _ _ loc) loc]
     [(ast-shift _ _ loc) loc]
     [(ast-extend _ _ loc) loc]
     [(ast-cond _ loc) loc]
@@ -181,7 +184,10 @@
   (match node
     [(ast-reg _ _ _ _ _ _ _) (ast-reg->string node)]
     [(ast-imm v _) (format "#~a" v)]
-    [(ast-label name _) (symbol->string name)]
+    [(ast-label name reloc _)
+     (if reloc
+         (format "~a@~a" name reloc)
+         (symbol->string name))]
     [(ast-shift kind amount _)
      (if amount
          (format "~a #~a" (symbol->string kind) amount)
