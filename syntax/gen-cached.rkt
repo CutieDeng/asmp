@@ -65,14 +65,20 @@
 ;; 构建索引
 ;; ============================================================
 
-;; 按助记符索引: mnemonic -> (listof (encoding-id template constraints))
+;; 按助记符索引: mnemonic -> (listof (encoding-id template constraints operand-fields))
 (define (build-mnemonic-index specs)
   (define index (make-hash))
   (for ([spec (in-list specs)])
     (match spec
+      ;; 新格式 (5 元素)
+      [(list enc-id mnem template constraints operand-fields)
+       (hash-update! index mnem
+                     (λ (lst) (cons (list enc-id template constraints operand-fields) lst))
+                     '())]
+      ;; 旧格式 (4 元素)
       [(list enc-id mnem template constraints)
        (hash-update! index mnem
-                     (λ (lst) (cons (list enc-id template constraints) lst))
+                     (λ (lst) (cons (list enc-id template constraints '()) lst))
                      '())]
       [_ (void)]))
   ;; Reverse to preserve order
@@ -85,7 +91,8 @@
   (define index (make-hash))
   (for ([spec (in-list specs)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 支持新旧格式
+      [(list enc-id mnem template constraints _ ...)
        (define sig (template->layer2 template))
        (define cls (layer2->layer1 sig))
        (hash-update! index mnem
@@ -101,7 +108,8 @@
   (define index (make-hash))
   (for ([spec (in-list specs)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 支持新旧格式
+      [(list enc-id mnem template constraints _ ...)
        (define sig (template->layer2 template))
        (define cls (layer2->layer1 sig))
        (define key (list mnem cls))
@@ -119,7 +127,8 @@
 
   (for ([spec (in-list specs)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 新格式 (5 元素)
+      [(list enc-id mnem template constraints operand-fields)
        (define sig (template->layer2 template))
        (define cls (layer2->layer1 sig))
 
@@ -136,7 +145,24 @@
        ;; 获取或创建 layer2-sig 的 encoding list
        (define sig-key (format "~s" sig))
        (hash-update! l2-table sig-key
-                     (λ (lst) (cons (list enc-id template constraints) lst))
+                     (λ (lst) (cons (list enc-id template constraints operand-fields) lst))
+                     '())]
+      ;; 旧格式 (4 元素)
+      [(list enc-id mnem template constraints)
+       (define sig (template->layer2 template))
+       (define cls (layer2->layer1 sig))
+
+       (unless (hash-has-key? table mnem)
+         (hash-set! table mnem (make-hash)))
+       (define l1-table (hash-ref table mnem))
+
+       (unless (hash-has-key? l1-table cls)
+         (hash-set! l1-table cls (make-hash)))
+       (define l2-table (hash-ref l1-table cls))
+
+       (define sig-key (format "~s" sig))
+       (hash-update! l2-table sig-key
+                     (λ (lst) (cons (list enc-id template constraints '()) lst))
                      '())]
       [_ (void)]))
 
@@ -169,6 +195,38 @@
                 (reverse transforms)
                 (loop (cons datum transforms))))))
       '()))
+
+;; 加载自定义别名
+;; 格式: (mnemonic (class signature) target-mnemonic transform)
+;; 返回两个值: alias-sigs 和 alias-transforms 格式的列表
+(define (load-custom-aliases path)
+  (if (file-exists? path)
+      (with-input-from-file path
+        (lambda ()
+          (define sigs-hash (make-hash))
+          (define transforms-hash (make-hash))
+          (let loop ()
+            (define datum (read))
+            (unless (eof-object? datum)
+              (match datum
+                [(list mnem (list cls sig) target-mnem transform)
+                 ;; 添加到签名
+                 (hash-update! sigs-hash mnem
+                               (lambda (lst) (cons (list cls sig) lst))
+                               '())
+                 ;; 添加到转换
+                 (hash-update! transforms-hash mnem
+                               (lambda (lst) (cons (list (list cls sig) target-mnem transform) lst))
+                               '())]
+                [_ (void)])
+              (loop)))
+          ;; 转换为列表格式
+          (values
+           (for/list ([(mnem entries) (in-hash sigs-hash)])
+             (list mnem entries))
+           (for/list ([(mnem entries) (in-hash transforms-hash)])
+             (cons mnem entries)))))
+      (values '() '())))
 
 ;; 将别名签名合并到 Layer1 索引
 ;; alias-sigs: ((alias-mnem ((class sig) ...)) ...)
@@ -216,10 +274,29 @@
          (match rule
            [(list (list cls sig) target-mnem transform)
             (define key (list mnem cls sig))
-            (hash-set! index key (cons target-mnem transform))]
+            (define new-val (cons target-mnem transform))
+            ;; 检查是否已存在更好的转换
+            (define existing (hash-ref index key #f))
+            (cond
+              [(not existing)
+               ;; 没有现有值，直接设置
+               (hash-set! index key new-val)]
+              [(transform-has-shift-keyword? transform)
+               ;; 新转换有 shift 关键字，优先使用
+               (hash-set! index key new-val)]
+              [else
+               ;; 保留现有的（可能有 shift 关键字）
+               (void)])]
            [_ (void)]))]
       [_ (void)]))
   index)
+
+;; 检查转换规则是否包含移位关键字 (const lsl/lsr/asr/ror)
+(define (transform-has-shift-keyword? transform)
+  (for/or ([elem (in-list transform)])
+    (and (pair? elem)
+         (eq? (car elem) 'const)
+         (memq (cadr elem) '(lsl lsr asr ror)))))
 
 ;; 保存别名转换索引
 (define (save-alias-transform-index index output-path)
@@ -294,24 +371,38 @@
 
 (define (rebuild-all-caches spec-path cache-dir
                             #:alias-sig-path [alias-sig-path #f]
-                            #:alias-transform-path [alias-transform-path #f])
+                            #:alias-transform-path [alias-transform-path #f]
+                            #:custom-alias-path [custom-alias-path #f])
   (printf "加载指令规范: ~a\n" spec-path)
   (define specs (load-instruction-spec spec-path))
   (printf "已加载 ~a 条记录\n\n" (length specs))
 
   ;; 加载别名规范
-  (define alias-sigs
+  (define alias-sigs-base
     (if alias-sig-path
         (begin
           (printf "加载别名签名: ~a\n" alias-sig-path)
           (load-alias-signatures alias-sig-path))
         '()))
-  (define alias-transforms
+  (define alias-transforms-base
     (if alias-transform-path
         (begin
           (printf "加载别名转换: ~a\n" alias-transform-path)
           (load-alias-transforms alias-transform-path))
         '()))
+
+  ;; 加载自定义别名
+  (define-values (custom-sigs custom-transforms)
+    (if custom-alias-path
+        (begin
+          (printf "加载自定义别名: ~a\n" custom-alias-path)
+          (load-custom-aliases custom-alias-path))
+        (values '() '())))
+
+  ;; 合并别名
+  (define alias-sigs (append alias-sigs-base custom-sigs))
+  (define alias-transforms (append alias-transforms-base custom-transforms))
+
   (when (pair? alias-sigs)
     (printf "已加载 ~a 个别名定义\n\n" (length alias-sigs)))
 
@@ -355,6 +446,8 @@
     (make-parameter "syntax/data/alias-signatures.rktd"))
   (define alias-transform-path
     (make-parameter "syntax/data/alias-transforms.rktd"))
+  (define custom-alias-path
+    (make-parameter "syntax/data/custom-aliases.rktd"))
 
   (command-line
    #:program "gen-cached"
@@ -363,8 +456,10 @@
    [("-c" "--cache") dir "Cache output directory" (cache-dir dir)]
    [("--alias-sig") path "Path to alias-signatures.rktd" (alias-sig-path path)]
    [("--alias-transform") path "Path to alias-transforms.rktd" (alias-transform-path path)]
+   [("--custom-alias") path "Path to custom-aliases.rktd" (custom-alias-path path)]
    #:args ()
 
    (rebuild-all-caches (spec-path) (cache-dir)
                        #:alias-sig-path (alias-sig-path)
-                       #:alias-transform-path (alias-transform-path))))
+                       #:alias-transform-path (alias-transform-path)
+                       #:custom-alias-path (custom-alias-path))))

@@ -53,8 +53,9 @@
          (and mnemonic
               (let-values ([(operand-names syntax-class template)
                             (analyze-assembly* rules assembly)])
-                (let ([constraints (extract-constraints* encoding)])
-                  (list encoding-id mnemonic template constraints)))))))
+                (let ([constraints (extract-constraints* encoding)]
+                      [operand-fields (extract-operand-fields* assembly)])
+                  (list encoding-id mnemonic template constraints operand-fields)))))))
 
 ;; 提取约束
 (define (extract-constraints* encoding)
@@ -95,6 +96,38 @@
     [(string=? name "size") `(element-size B H S D)]
     [(string=? name "shift") `(imm-range 0 ,max-val 1)]
     [else #f]))
+
+;; 提取操作数字段名序列 (用于检测绑定操作数)
+;; 返回: (listof string) - 按操作数顺序的字段名
+;; 例如: ("Zdn" "Pg" "Zdn" "Zm") - Zdn 出现两次表示绑定
+(define (extract-operand-fields* assembly)
+  (define symbols (get-symbol-list* assembly))
+  (define fields '())
+  (define after-space? #f)
+
+  (for ([sym (in-list symbols)])
+    (match (hash-ref sym '_type #f)
+      ["Instruction.Symbols.RuleReference"
+       (define rule-id (hash-ref sym 'rule_id #f))
+       (when rule-id
+         (cond
+           [(equal? rule-id "SPACE")
+            (set! after-space? #t)]
+           [(and after-space?
+                 (not (member rule-id '("COMMA" "OPT_SPACE" "hash")))
+                 (operand-field? rule-id))
+            (set! fields (cons rule-id fields))]))]
+      [_ (void)]))
+
+  (reverse fields))
+
+;; 判断是否为操作数字段 (寄存器或立即数相关)
+(define (operand-field? rule-id)
+  (or (regexp-match? #rx"^[XWZBHSDQVP]" rule-id)  ; 寄存器
+      (regexp-match? #rx"^imm" rule-id)            ; 立即数
+      (regexp-match? #rx"^off" rule-id)            ; 偏移
+      (regexp-match? #rx"^shift" rule-id)          ; 移位
+      (member rule-id '("Rm" "Rn" "Rd" "Rt" "Rs" "Ra"))))
 
 ;; 从 syntax-variant.rkt 借用的辅助函数
 (define (extract-mnemonic* rules assembly)
@@ -139,7 +172,11 @@
       (fprintf out ";; instruction-spec.rktd - 指令规范 (核心数据)\n")
       (fprintf out ";; ============================================================\n")
       (fprintf out ";;\n")
-      (fprintf out ";; 格式: (encoding-id mnemonic template ((field constraint) ...))\n")
+      (fprintf out ";; 格式: (encoding-id mnemonic template ((field constraint) ...) (operand-fields ...))\n")
+      (fprintf out ";;\n")
+      (fprintf out ";; operand-fields: 按操作数顺序的字段名列表\n")
+      (fprintf out ";;   - 同一字段名出现多次表示绑定操作数 (必须使用同一寄存器)\n")
+      (fprintf out ";;   - 例如 (\"Zdn\" \"Pg\" \"Zdn\" \"Zm\") 中 Zdn 出现两次，表示操作数 0 和 2 绑定\n")
       (fprintf out ";;\n")
       (fprintf out ";; 这是唯一的核心数据文件，其他数据可从此计算:\n")
       (fprintf out ";;   - Layer2 签名: 从 template 通过 parse-template-signature 计算\n")

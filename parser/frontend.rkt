@@ -174,10 +174,22 @@
   (with-handlers
     ([exn:fail?
       (lambda (e)
+        ;; 清理错误消息，去除 Racket 内部格式
+        (define raw-msg (exn-message e))
+        (define clean-msg
+          (cond
+            ;; 匹配失败错误
+            [(regexp-match #rx"^match: no matching clause for (.+)$" raw-msg)
+             => (lambda (m) (format "无法解析: ~a" (cadr m)))]
+            ;; 自定义错误 (parse-instruction: ...)
+            [(regexp-match #rx"^parse-[^:]+: (.+)$" raw-msg)
+             => (lambda (m) (cadr m))]
+            ;; 其他错误保持原样
+            [else raw-msg]))
         (parse-result #f
                       (syntax->srcloc stx)
                       #f
-                      (parse-error (exn-message e)
+                      (parse-error clean-msg
                                    (syntax->srcloc stx)
                                    'syntax)))])
     ;; 判断是指令还是元语法指令

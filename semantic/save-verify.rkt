@@ -70,6 +70,16 @@
 ;; ============================================================
 
 (define (verify-save-load fn)
+  ;; 空函数 (无入口块) 直接返回空结果
+  (define entry (asm-function-entry fn))
+  (if (not entry)
+      (save-load-info '() '()
+                      (ordered-map-empty symbol-compare)
+                      (ordered-map-empty symbol-compare)
+                      '())
+      (verify-save-load-impl fn)))
+
+(define (verify-save-load-impl fn)
   ;; 1. 收集所有 save!/load! 点
   (define-values (saves loads) (collect-save-load-points fn))
 

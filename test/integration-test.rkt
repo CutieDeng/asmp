@@ -447,10 +447,10 @@
       (check-exn
        (lambda (e)
          (and (exn:fail? e)
-              (regexp-match? #rx"跨寄存器类别" (exn-message e))
+              (regexp-match? #rx"跨类别冲突" (exn-message e))
               (regexp-match? #rx"result" (exn-message e))
-              (regexp-match? #rx"SVE 向量寄存器" (exn-message e))
-              (regexp-match? #rx"SVE 谓词寄存器" (exn-message e))))
+              (regexp-match? #rx"z\\.result" (exn-message e))
+              (regexp-match? #rx"p\\.result" (exn-message e))))
        (lambda () (compile-to-asm source))
        "应检测到跨寄存器类别的同名虚拟变量"))
 

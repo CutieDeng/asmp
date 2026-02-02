@@ -22,7 +22,7 @@
 
 (ngcs ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
-(asr ((c4 (gpr-32 gpr-32 immediate keyword)) (c4 (gpr-64 gpr-64 immediate keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(asr ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
 
 (stsetl ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -30,7 +30,7 @@
 
 (dc ((c1 (gpr-64))))
 
-(lsl ((c4 (gpr-32 gpr-32 immediate keyword)) (c4 (gpr-64 gpr-64 immediate keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(lsl ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
 
 (stsmax ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -46,17 +46,17 @@
 
 (staddh ((c2 (gpr-32 gpr-64))))
 
-(cbls ((c3 (gpr-32 gpr-32 immediate)) (c3 (gpr-64 gpr-64 immediate)) (c4 (gpr-32 immediate immediate immediate)) (c4 (gpr-64 immediate immediate immediate))))
+(cbls ((c3 (gpr-32 gpr-32 immediate)) (c3 (gpr-64 gpr-64 immediate)) (c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate))))
 
 (cmple ((c4 (sve-p sve-p sve-z sve-z))))
 
 (cbble ((c3 (gpr-32 gpr-32 immediate))))
 
-(ror ((c4 (gpr-32 gpr-64 immediate keyword)) (c4 (gpr-64 gpr-64 immediate keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(ror ((c3 (gpr-32 gpr-64 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
 
-(mvn ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c2 (simd-v simd-v))))
+(mvn ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64)) (c2 (simd-v simd-v))))
 
-(ubfx ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(ubfx ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (stset ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -74,13 +74,13 @@
 
 (cosp ((c1 (gpr-64))))
 
-(ubfiz ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(ubfiz ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (stseth ((c2 (gpr-32 gpr-64))))
 
 (csetm ((c1 (gpr-32)) (c1 (gpr-64))))
 
-(orn ((c4 (sve-z sve-z immediate immediate))))
+(orn ((c3 (sve-z sve-z immediate))))
 
 (stuminl ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -92,7 +92,7 @@
 
 (steorlh ((c2 (gpr-32 gpr-64))))
 
-(sbfx ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(sbfx ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (sttset ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -100,13 +100,13 @@
 
 (steor ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
-(bic ((c4 (sve-z sve-z immediate immediate))))
+(bic ((c3 (sve-z sve-z immediate))))
 
 (stsminl ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
 (stsmaxb ((c2 (gpr-32 gpr-64))))
 
-(bfi ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(bfi ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (gcspopx ((c4 (immediate immediate immediate immediate))))
 
@@ -118,7 +118,7 @@
 
 (steorb ((c2 (gpr-32 gpr-64))))
 
-(mov ((c2 (sve-z sve-z)) (c3 (sve-z immediate immediate)) (c5 (sve-z sve-p immediate immediate keyword)) (c2 (sve-z simd-v)) (c3 (sve-z sve-z immediate)) (c2 (sve-z gpr-64)) (c3 (sve-z sve-p simd-v)) (c3 (sve-z sve-p gpr-64)) (c3 (sve-z sve-p sve-z)) (c3 (sve-p sve-p sve-p)) (c2 (sve-p sve-p)) (c4 (sve-z immediate immediate keyword)) (c4 (gpr-32 immediate sve-p sve-z)) (c5 (sve-z gpr-32 immediate sve-p sve-z)) (c5 (gpr-32 immediate immediate sve-z sve-z)) (c6 (sve-z gpr-32 immediate immediate sve-z sve-z)) (c4 (gpr-32 immediate sve-z sve-z)) (c4 (sve-z sve-p gpr-32 immediate)) (c5 (sve-z sve-p sve-z gpr-32 immediate)) (c5 (sve-z sve-z gpr-32 immediate immediate)) (c6 (sve-z sve-z sve-z gpr-32 immediate immediate)) (c4 (sve-z sve-z gpr-32 immediate)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64)) (c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate)) (c2 (gpr-32 immediate)) (c2 (gpr-64 immediate)) (c3 (simd-v simd-v immediate)) (c2 (gpr-32 simd-v)) (c4 (simd-v immediate gpr-64 gpr-64)) (c2 (gpr-64 simd-v)) (c4 (simd-v immediate simd-v immediate)) (c2 (simd-v simd-v))))
+(mov ((c2 (sve-z sve-z)) (c2 (sve-z immediate)) (c3 (sve-z sve-p immediate)) (c2 (sve-z simd-v)) (c3 (sve-z sve-z immediate)) (c2 (sve-z gpr-64)) (c3 (sve-z sve-p simd-v)) (c3 (sve-z sve-p gpr-64)) (c3 (sve-z sve-p sve-z)) (c3 (sve-p sve-p sve-p)) (c2 (sve-p sve-p)) (c4 (gpr-32 immediate sve-p sve-z)) (c5 (sve-z gpr-32 immediate sve-p sve-z)) (c5 (gpr-32 immediate immediate sve-z sve-z)) (c6 (sve-z gpr-32 immediate immediate sve-z sve-z)) (c4 (gpr-32 immediate sve-z sve-z)) (c4 (sve-z sve-p gpr-32 immediate)) (c5 (sve-z sve-p sve-z gpr-32 immediate)) (c5 (sve-z sve-z gpr-32 immediate immediate)) (c6 (sve-z sve-z sve-z gpr-32 immediate immediate)) (c4 (sve-z sve-z gpr-32 immediate)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64)) (c2 (gpr-32 immediate)) (c2 (gpr-64 immediate)) (c1 (gpr-32)) (c1 (gpr-64)) (c3 (simd-v simd-v immediate)) (c2 (gpr-32 simd-v)) (c4 (simd-v immediate gpr-64 gpr-64)) (c2 (gpr-64 simd-v)) (c4 (simd-v immediate simd-v immediate)) (c2 (simd-v simd-v))))
 
 (sttclr ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
@@ -140,13 +140,13 @@
 
 (cmpls ((c4 (sve-p sve-p sve-z sve-z))))
 
-(cmp ((c4 (gpr-32 immediate immediate keyword)) (c4 (gpr-64 immediate immediate keyword)) (c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c2 (gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(cmp ((c2 (gpr-32 immediate)) (c2 (gpr-64 immediate)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64)) (c3 (gpr-64 gpr-64 gpr-64))))
 
 (stclrh ((c2 (gpr-32 gpr-64))))
 
-(negs ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword))))
+(negs ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
-(lsr ((c4 (gpr-32 gpr-32 immediate keyword)) (c4 (gpr-64 gpr-64 immediate keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(lsr ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c3 (gpr-32 gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
 
 (tlbi ((c4 (immediate immediate immediate immediate))))
 
@@ -168,7 +168,7 @@
 
 (movs ((c3 (sve-p sve-p sve-p)) (c2 (sve-p sve-p))))
 
-(cbhs ((c4 (gpr-32 immediate immediate immediate)) (c4 (gpr-64 immediate immediate immediate))))
+(cbhs ((c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate))))
 
 (smull ((c3 (gpr-64 gpr-32 gpr-32))))
 
@@ -186,7 +186,7 @@
 
 (smstart ((c1 (immediate))))
 
-(cmn ((c4 (gpr-32 immediate immediate keyword)) (c4 (gpr-64 immediate immediate keyword)) (c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword)) (c2 (gpr-32 gpr-32)) (c3 (gpr-64 gpr-64 gpr-64))))
+(cmn ((c2 (gpr-32 immediate)) (c2 (gpr-64 immediate)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64)) (c3 (gpr-64 gpr-64 gpr-64))))
 
 (gcspopcx ((c4 (immediate immediate immediate immediate))))
 
@@ -200,7 +200,7 @@
 
 (stclrlh ((c2 (gpr-32 gpr-64))))
 
-(fmov ((c3 (sve-z sve-p immediate)) (c4 (sve-z sve-p immediate immediate)) (c2 (sve-z immediate)) (c3 (sve-z immediate immediate))))
+(fmov ((c2 (sve-z sve-p)) (c3 (sve-z sve-p immediate)) (c1 (sve-z)) (c2 (sve-z immediate))))
 
 (uxtb ((c2 (gpr-32 gpr-32))))
 
@@ -212,7 +212,7 @@
 
 (rev64 ((c2 (gpr-64 gpr-64))))
 
-(sbfiz ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(sbfiz ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (staddlh ((c2 (gpr-32 gpr-64))))
 
@@ -226,7 +226,7 @@
 
 (stsetlb ((c2 (gpr-32 gpr-64))))
 
-(cbge ((c4 (gpr-32 immediate immediate immediate)) (c4 (gpr-64 immediate immediate immediate))))
+(cbge ((c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate))))
 
 (cbhle ((c3 (gpr-32 gpr-32 immediate))))
 
@@ -234,9 +234,9 @@
 
 (ngc ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
-(tst ((c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate)) (c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword))))
+(tst ((c2 (gpr-32 immediate)) (c2 (gpr-64 immediate)) (c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
-(cble ((c3 (gpr-32 gpr-32 immediate)) (c3 (gpr-64 gpr-64 immediate)) (c4 (gpr-32 immediate immediate immediate)) (c4 (gpr-64 immediate immediate immediate))))
+(cble ((c3 (gpr-32 gpr-32 immediate)) (c3 (gpr-64 gpr-64 immediate)) (c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate))))
 
 (facle ((c4 (sve-p sve-p sve-z sve-z))))
 
@@ -266,7 +266,7 @@
 
 (umnegl ((c3 (gpr-64 gpr-32 gpr-32))))
 
-(neg ((c3 (gpr-32 gpr-32 keyword)) (c3 (gpr-64 gpr-64 keyword))))
+(neg ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (sxtb ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-32))))
 
@@ -274,7 +274,7 @@
 
 (gic ((c4 (immediate immediate immediate immediate))))
 
-(bfc ((c3 (gpr-32 immediate immediate)) (c3 (gpr-64 immediate immediate))))
+(bfc ((c1 (gpr-32)) (c1 (gpr-64))))
 
 (cbhlt ((c3 (gpr-32 gpr-32 immediate))))
 
@@ -292,7 +292,7 @@
 
 (brb ((c4 (immediate immediate immediate immediate))))
 
-(eon ((c4 (sve-z sve-z immediate immediate))))
+(eon ((c3 (sve-z sve-z immediate))))
 
 (dvp ((c1 (gpr-64))))
 
@@ -304,7 +304,7 @@
 
 (stadd ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 
-(bfxil ((c4 (gpr-32 gpr-32 immediate immediate)) (c4 (gpr-64 gpr-64 immediate immediate))))
+(bfxil ((c2 (gpr-32 gpr-32)) (c2 (gpr-64 gpr-64))))
 
 (stumin ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
 

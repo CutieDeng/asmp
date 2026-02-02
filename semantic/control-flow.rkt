@@ -85,7 +85,22 @@
   format-cfg
   format-cfg-function
   format-cfg-dot
-  format-function-dot)
+  format-function-dot
+
+  ;; 验证
+  verify-label-references       ; fn cfg -> pvector of label-ref-error
+  (struct-out label-ref-error)  ; 标签引用错误信息
+
+  ;; 符号名验证
+  valid-asm-symbol?             ; symbol -> boolean
+  verify-symbol-names           ; fn -> pvector of symbol-name-error
+  (struct-out symbol-name-error) ; 符号名错误信息
+  sanitize-symbol               ; symbol -> string (转换不合法字符)
+
+  ;; Pedantic 检查
+  check-linear-fallthrough      ; fn -> (or/c linear-fallthrough-warning? #f)
+  (struct-out linear-fallthrough-warning)
+  )
 
 ;; ============================================================
 ;; ID 类型
@@ -719,6 +734,200 @@
       (format "    bb~a -> bb~a;" (car kv) (bb-id-val succ-bbid))))
 
   (string-join (append node-lines edge-lines) "\n"))
+
+;; ============================================================
+;; 标签引用验证
+;; ============================================================
+
+;; 标签引用错误信息
+(struct label-ref-error
+  (label         ; symbol - 未定义的标签名
+   instruction   ; ast-ins - 引用该标签的指令
+   srcloc        ; srcloc - 源码位置
+   function-name ; symbol - 所在函数名
+   defined-labels) ; (listof symbol) - 该函数中已定义的标签
+  #:transparent)
+
+;; 从指令中提取所有标签引用
+(define (extract-label-refs ins)
+  (match ins
+    [(ast-ins _ _ operands _)
+     (for/list ([op (in-list operands)]
+                #:when (ast-label? op))
+       (ast-label-name op))]
+    [_ '()]))
+
+;; 验证函数中的标签引用
+;; 返回 pvector of label-ref-error
+(define (verify-label-references fn cfg)
+  (define fn-name (asm-function-name fn))
+
+  ;; 收集本函数定义的所有标签
+  (define local-labels
+    (for/set ([kv (in-ordered-map (asm-function-label->id fn))])
+      (car kv)))
+
+  ;; 收集 CFG 中所有函数名 (作为有效的外部引用)
+  (define external-symbols
+    (for/set ([kv (in-ordered-map (control-flow-graph-fn-names cfg))])
+      (car kv)))
+
+  ;; 有效的标签 = 本地标签 + 外部函数名
+  (define valid-labels (set-union local-labels external-symbols))
+
+  ;; 遍历所有指令，检查标签引用
+  (define errors (box (pvector-empty)))
+  (fn-for-each-block fn
+    (lambda (block)
+      (for ([ins (in-pvector (basic-block-instructions block))])
+        (when (ast-ins? ins)
+          (for ([label (in-list (extract-label-refs ins))])
+            (unless (set-member? valid-labels label)
+              (set-box! errors
+                        (pvector-cons-right
+                         (unbox errors)
+                         (label-ref-error
+                          label
+                          ins
+                          (ast-srcloc ins)
+                          fn-name
+                          (set->list local-labels))))))))))
+  (unbox errors))
+
+;; ============================================================
+;; 符号名验证
+;; ============================================================
+
+;; 符号名错误信息
+(struct symbol-name-error
+  (symbol         ; symbol - 不合法的符号名
+   kind           ; 'function | 'label - 符号类型
+   function-name  ; symbol - 所在函数名 (如果是标签)
+   reason)        ; string - 错误原因
+  #:transparent)
+
+;; 检查符号是否是合法的汇编符号名
+;; 规则：以字母或下划线开头，只包含字母、数字、下划线
+(define (valid-asm-symbol? sym)
+  (define str (if (symbol? sym) (symbol->string sym) sym))
+  (and (> (string-length str) 0)
+       (let ([first-char (string-ref str 0)])
+         (or (char-alphabetic? first-char)
+             (char=? first-char #\_)))
+       (for/and ([c (in-string str)])
+         (or (char-alphabetic? c)
+             (char-numeric? c)
+             (char=? c #\_)))))
+
+;; 将不合法的符号转换为合法符号
+;; 规则：不合法字符替换为 _
+(define (sanitize-symbol sym)
+  (define str (if (symbol? sym) (symbol->string sym) sym))
+  (define sanitized
+    (list->string
+     (for/list ([c (in-string str)]
+                [i (in-naturals)])
+       (cond
+         ;; 首字符必须是字母或下划线
+         [(and (= i 0)
+               (not (or (char-alphabetic? c) (char=? c #\_))))
+          #\_]
+         ;; 其他字符：字母、数字、下划线
+         [(or (char-alphabetic? c)
+              (char-numeric? c)
+              (char=? c #\_))
+          c]
+         ;; 不合法字符替换为下划线
+         [else #\_]))))
+  sanitized)
+
+;; 验证函数中的符号名
+;; 返回 pvector of symbol-name-error
+(define (verify-symbol-names fn)
+  (define fn-name (asm-function-name fn))
+  (define errors (box (pvector-empty)))
+
+  ;; 检查函数名
+  (unless (valid-asm-symbol? fn-name)
+    (set-box! errors
+              (pvector-cons-right
+               (unbox errors)
+               (symbol-name-error
+                fn-name
+                'function
+                #f
+                (format "函数名 '~a' 包含不合法字符 (只允许字母、数字、下划线，且不能以数字开头)"
+                        fn-name)))))
+
+  ;; 检查局部标签 (这里只是警告，因为局部标签会被转换)
+  ;; 实际上局部标签不需要验证，因为会被自动转换
+  ;; 但如果用户想知道哪些标签被转换了，可以开启详细模式
+
+  (unbox errors))
+
+;; ============================================================
+;; Pedantic 检查：线性 fallthrough
+;; ============================================================
+
+;; 警告信息
+(struct linear-fallthrough-warning
+  (function-name    ; symbol
+   instruction-count ; integer - 指令数量
+   last-instruction  ; ast-ins | #f - 最后一条指令
+   srcloc)           ; srcloc | #f - 源码位置
+  #:transparent)
+
+;; 检查是否是跳转/终止指令
+(define (terminator-instruction? ins)
+  (and (ast-ins? ins)
+       (let ([mnem (ast-ins-mnemonic ins)])
+         (or (eq? mnem 'ret)
+             (eq? mnem 'eret)
+             (eq? mnem 'br)
+             (eq? mnem 'blr)
+             ;; 无条件跳转
+             (eq? mnem 'b)
+             ;; 条件分支也算（有跳转可能）
+             (and (symbol? mnem)
+                  (let ([s (symbol->string mnem)])
+                    (and (> (string-length s) 2)
+                         (string=? (substring s 0 2) "b."))))))))
+
+;; 检查函数是否为"纯线性代码但无终止指令"
+;; 条件：
+;;   1. 只有一个基本块（无跳转）
+;;   2. 有指令（非空函数）
+;;   3. 最后一条指令不是终止指令
+;; 返回 linear-fallthrough-warning 或 #f
+(define (check-linear-fallthrough fn)
+  (define fn-name (asm-function-name fn))
+  (define block-count (fn-block-count fn))
+
+  ;; 只检查单基本块函数
+  (cond
+    [(not (= block-count 1)) #f]
+    [else
+     (define entry (asm-function-entry fn))
+     (cond
+       [(not entry) #f]  ; 空函数
+       [else
+        (define block (fn-get-block fn entry))
+        (cond
+          [(not block) #f]
+          [else
+           (define instrs (basic-block-instructions block))
+           (define len (pvector-length instrs))
+           (cond
+             [(= len 0) #f]  ; 空块
+             [else
+              (define last-ins (pvector-ref instrs (sub1 len)))
+              (if (terminator-instruction? last-ins)
+                  #f
+                  (linear-fallthrough-warning
+                   fn-name
+                   len
+                   last-ins
+                   (and (ast-ins? last-ins) (ast-srcloc last-ins))))])])])]))
 
 ;; ============================================================
 ;; 测试

@@ -28,6 +28,7 @@
   lookup-layer1-classes ; 查找 Layer1 类
   lookup-layer2-sigs    ; 查找 Layer2 签名
   lookup-encodings      ; 查找具体编码
+  get-encoding-operand-fields  ; 获取编码的操作数字段
 
   ;; 计算接口 (带缓存)
   template->layer2/cached
@@ -143,6 +144,18 @@
   (define h (make-hash))
   (for ([spec (get-spec-db)])
     (match spec
+      ;; 新格式 (5 元素): enc-id mnem template constraints operand-fields
+      [(list enc-id mnem template constraints operand-fields)
+       (define field-hash (make-hash))
+       (for ([c (in-list constraints)])
+         (match c
+           [(list field-name constraint-sexp)
+            (define constraint (sexp->constraint constraint-sexp))
+            (when constraint
+              (hash-set! field-hash field-name constraint))]
+           [_ (void)]))
+       (hash-set! h enc-id field-hash)]
+      ;; 旧格式 (4 元素): enc-id mnem template constraints
       [(list enc-id mnem template constraints)
        (define field-hash (make-hash))
        (for ([c (in-list constraints)])
@@ -199,9 +212,15 @@
   (define h (make-hash))
   (for ([spec (get-spec-db)])
     (match spec
+      ;; 新格式 (5 元素)
+      [(list enc-id mnem template constraints operand-fields)
+       (hash-update! h mnem
+                     (λ (lst) (cons (list enc-id template constraints operand-fields) lst))
+                     '())]
+      ;; 旧格式 (4 元素)
       [(list enc-id mnem template constraints)
        (hash-update! h mnem
-                     (λ (lst) (cons (list enc-id template constraints) lst))
+                     (λ (lst) (cons (list enc-id template constraints '()) lst))
                      '())]
       [_ (void)]))
   (for ([(k v) (in-hash h)])
@@ -212,7 +231,8 @@
   (define h (make-hash))
   (for ([spec (get-spec-db)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 新格式或旧格式都能匹配
+      [(list enc-id mnem template constraints _ ...)
        (define l2 (template->layer2/cached template))
        (define l1 (layer2->layer1/cached l2))
        (hash-update! h mnem (λ (s) (set-add s l1)) (set))]
@@ -224,7 +244,8 @@
   (define h (make-hash))
   (for ([spec (get-spec-db)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 新格式或旧格式都能匹配
+      [(list enc-id mnem template constraints _ ...)
        (define l2 (template->layer2/cached template))
        (define l1 (layer2->layer1/cached l2))
        (hash-update! h (cons mnem l1) (λ (s) (set-add s l2)) (set))]
@@ -236,7 +257,8 @@
   (define h (make-hash))
   (for ([spec (get-spec-db)])
     (match spec
-      [(list enc-id mnem template constraints)
+      ;; 新格式 (5 元素)
+      [(list enc-id mnem template constraints operand-fields)
        (define l2 (template->layer2/cached template))
        (define l1 (layer2->layer1/cached l2))
        ;; 创建层级结构
@@ -248,7 +270,21 @@
        (define l2-h (hash-ref l1-h l1))
        (define l2-key (format "~s" l2))
        (hash-update! l2-h l2-key
-                     (λ (lst) (cons (list enc-id template constraints) lst))
+                     (λ (lst) (cons (list enc-id template constraints operand-fields) lst))
+                     '())]
+      ;; 旧格式 (4 元素)
+      [(list enc-id mnem template constraints)
+       (define l2 (template->layer2/cached template))
+       (define l1 (layer2->layer1/cached l2))
+       (unless (hash-has-key? h mnem)
+         (hash-set! h mnem (make-hash)))
+       (define l1-h (hash-ref h mnem))
+       (unless (hash-has-key? l1-h l1)
+         (hash-set! l1-h l1 (make-hash)))
+       (define l2-h (hash-ref l1-h l1))
+       (define l2-key (format "~s" l2))
+       (hash-update! l2-h l2-key
+                     (λ (lst) (cons (list enc-id template constraints '()) lst))
                      '())]
       [_ (void)]))
   h)
@@ -329,6 +365,15 @@
         (if sig-entry
             (cdr sig-entry)  ; 返回编码列表
             '())])]
+    [else '()]))
+
+;; 从编码条目获取操作数字段列表
+;; encoding: (enc-id template constraints operand-fields) 或 (enc-id template constraints)
+;; 返回: (listof string) 或 '()
+(define (get-encoding-operand-fields encoding)
+  (cond
+    [(and (list? encoding) (>= (length encoding) 4))
+     (list-ref encoding 3)]
     [else '()]))
 
 ;; ============================================================

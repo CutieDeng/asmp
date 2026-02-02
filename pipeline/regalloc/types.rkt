@@ -146,7 +146,9 @@
       [(p) 'predicate]
       [else 'gpr]))
 
-  (define virtual? (symbol? id))
+  ;; sp 和 zr 是特殊符号，不是虚拟寄存器
+  (define virtual? (and (symbol? id)
+                        (not (memq id '(sp zr)))))
 
   (define actual-id
     (cond

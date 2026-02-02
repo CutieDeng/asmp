@@ -116,7 +116,9 @@
       (define sym-type (hash-ref sym '_type #f))
       (when (equal? sym-type "Instruction.Symbols.RuleReference")
         (define rule-id (hash-ref sym 'rule_id #f))
-        (when rule-id
+        (when (and rule-id
+                   ;; 忽略 optional_ 开头的规则（可选移位/扩展不计入签名）
+                   (not (regexp-match? #rx"^optional_" rule-id)))
           (cond
             ;; GPR
             [(regexp-match? #rx"^[WX]" rule-id)
@@ -133,13 +135,12 @@
             ;; SIMD V register
             [(regexp-match? #rx"^V" rule-id)
              (set! operands (cons 'simd-v operands))]
-            ;; Immediate
+            ;; Immediate (不包括 hash，因为它只是 # 前缀)
             [(or (regexp-match? #rx"^imm" rule-id)
-                 (regexp-match? #rx"^hash" rule-id)
                  (regexp-match? #rx"^const" rule-id)
                  (regexp-match? #rx"^offs" rule-id))
              (set! operands (cons 'immediate operands))]
-            ;; Shift/extend
+            ;; Shift/extend (非可选的)
             [(regexp-match? #rx"shift" rule-id)
              (set! operands (cons 'keyword operands))])))))
 
@@ -213,7 +214,9 @@
       (when (equal? sym-type "Instruction.Symbols.RuleReference")
         (define rule-id (hash-ref sym 'rule_id #f))
         (when (and rule-id
-                   (not (member rule-id '("SPACE" "OPT_SPACE" "COMMA"))))
+                   (not (member rule-id '("SPACE" "OPT_SPACE" "COMMA")))
+                   ;; 忽略 optional_ 开头的规则（可选移位/扩展）
+                   (not (regexp-match? #rx"^optional_" rule-id)))
           ;; 提取核心寄存器名称
           ;; "XdOrXZR__6" -> "Xd"
           ;; "Pn__3" -> "Pn"
@@ -311,7 +314,23 @@
       ;; 找到了别名操作数映射
       [alias-op-name
        (define idx (hash-ref alias-name->index alias-op-name #f))
-       (if idx idx 0)]
+       (cond
+         ;; 成功找到别名操作数索引
+         [idx idx]
+         ;; 映射存在但不在别名操作数中 - 检查目标部分类型或映射值本身
+         ;; 移位类型 (LSL, LSR, ASR, ROR) - 检查 target-part 或 alias-op-name
+         [(or (member target-part-trimmed '("LSL" "LSR" "ASR" "ROR"))
+              (member alias-op-name '("LSL" "LSR" "ASR" "ROR")))
+          (list 'const (string->symbol (string-downcase
+            (if (member target-part-trimmed '("LSL" "LSR" "ASR" "ROR"))
+                target-part-trimmed
+                alias-op-name))))]
+         ;; 立即数 (UInteger 等通常是 0)
+         [(or (regexp-match? #rx"^UInteger|^Integer|^#" target-part-trimmed)
+              (regexp-match? #rx"^[0-9]+$" alias-op-name))
+          (list 'const 0)]
+         ;; 回退默认值
+         [else 0])]
 
       ;; 零寄存器 (XZR, WZR) - 只有当 encoded_in 没有映射时才使用
       [(regexp-match? #rx"^XZR|^WZR" target-part-trimmed)
@@ -364,7 +383,20 @@
                                 (and (regexp-match? #rx"^Z" target-part-trimmed)
                                      (regexp-match? #rx"^Z" name))))
            j))
-       (or best-match (min i (max 0 (sub1 (length alias-operand-names)))))])))
+       (cond
+         ;; 找到了类型匹配的别名操作数
+         [best-match best-match]
+         ;; 没有匹配，且目标是移位类型 -> 使用默认 LSL
+         [(member target-part-trimmed '("LSL" "LSR" "ASR" "ROR" "lsl" "lsr" "asr" "ror"))
+          (list 'const 'lsl)]
+         ;; 没有匹配，且目标是立即数 -> 使用默认 0
+         [(regexp-match? #rx"^UInteger|^Integer|^#|imm" target-part-trimmed)
+          (list 'const 0)]
+         ;; 其他情况：避免越界，使用常量 0
+         [(>= i (length alias-operand-names))
+          (list 'const 0)]
+         ;; 回退到位置匹配
+         [else i])])))
 
 ;; ============================================================
 ;; 加载指令规范

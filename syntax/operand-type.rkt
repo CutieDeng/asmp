@@ -9,13 +9,21 @@
 
   ;; 模板解析
   parse-template-signature
+  parse-template-signature/detailed  ; 详细版本，包含谓词限定符
 
   ;; AST 操作数分类
   classify-ast-operand
+  classify-ast-operand/detailed  ; 详细版本，包含谓词限定符
 
   ;; 签名匹配
   signature-matches?
-  operand-type-compatible?)
+  operand-type-compatible?
+
+  ;; 谓词限定符
+  (struct-out operand-info)
+  pred-qualifier?
+  pred-qualifier->string
+  check-pred-qualifier-match)
 
 ;; ============================================================
 ;; 操作数类型定义 (Layer 2)
@@ -250,9 +258,19 @@
 ;; 分类 AST 操作数节点
 (define (classify-ast-operand op)
   (match op
-    ;; 寄存器
-    [(ast-reg kind id _ _ element pred-mode _)
-     (classify-ast-reg kind id element pred-mode)]
+    ;; 寄存器 - 带 group-size 但无 index 的视为寄存器列表
+    ;; 有 index 的表示从组中选择单个寄存器，视为普通寄存器
+    [(ast-reg kind id group-size index element pred-mode _)
+     (cond
+       ;; 有 @index：从组中选择单个寄存器
+       [index
+        (classify-ast-reg kind id element pred-mode)]
+       ;; 有 group-size 但无 index：寄存器列表
+       [(and group-size (>= group-size 1))
+        'reg-list]
+       ;; 普通寄存器
+       [else
+        (classify-ast-reg kind id element pred-mode)])]
 
     ;; 立即数 - 区分正数和负数
     [(ast-imm value _)
@@ -359,3 +377,79 @@
 
     ;; 其他情况不兼容
     [else #f]))
+
+;; ============================================================
+;; 详细操作数信息 (包含谓词限定符)
+;; ============================================================
+
+;; 操作数详细信息
+;; type: operand-type (如 'sve-p)
+;; pred-qualifier: 'none | 'm | 'z (仅用于 sve-p 类型)
+(struct operand-info (type pred-qualifier) #:transparent)
+
+;; 谓词限定符类型检查
+(define (pred-qualifier? x)
+  (memq x '(none m z)))
+
+;; 格式化谓词限定符
+(define (pred-qualifier->string q)
+  (case q
+    [(none) "无限定符"]
+    [(m) "/M (合并)"]
+    [(z) "/Z (清零)"]
+    [else "?"]))
+
+;; 从模板字符串提取详细操作数信息
+;; 返回: (listof operand-info)
+(define (parse-template-signature/detailed template)
+  (define parts (split-template template))
+  (map classify-template-part/detailed parts))
+
+;; 分类单个模板部分 (详细版本)
+(define (classify-template-part/detailed part)
+  (define trimmed (string-trim part))
+  (define base-type (classify-template-part trimmed))
+
+  ;; 提取谓词限定符
+  (define pred-qual
+    (cond
+      ;; 只有 sve-p 类型需要检查限定符
+      [(eq? base-type 'sve-p)
+       (cond
+         [(regexp-match? #rx"/M$" trimmed) 'm]
+         [(regexp-match? #rx"/Z$" trimmed) 'z]
+         [else 'none])]
+      [else #f]))
+
+  (operand-info base-type pred-qual))
+
+;; 分类 AST 操作数节点 (详细版本)
+(define (classify-ast-operand/detailed op)
+  (match op
+    [(ast-reg kind id _ _ element pred-mode _)
+     (define base-type (classify-ast-reg kind id element pred-mode))
+     (operand-info base-type
+                   (if (eq? kind 'p)
+                       (or pred-mode 'none)  ; #f -> 'none
+                       #f))]
+    [_
+     (operand-info (classify-ast-operand op) #f)]))
+
+;; 检查谓词限定符匹配
+;; expected: 'none | 'm | 'z (期望的限定符，来自模板)
+;; actual: 'm | 'z | #f (实际的限定符，来自 AST)
+;; 返回: #t 如果匹配，否则返回错误消息字符串
+(define (check-pred-qualifier-match expected actual)
+  (define actual-norm (or actual 'none))  ; #f -> 'none
+  (cond
+    [(eq? expected actual-norm) #t]
+    ;; 期望无限定符但实际有
+    [(and (eq? expected 'none) (not (eq? actual-norm 'none)))
+     (format "谓词不应带限定符，但使用了 /~a" actual-norm)]
+    ;; 期望有限定符但实际没有
+    [(and (not (eq? expected 'none)) (eq? actual-norm 'none))
+     (format "谓词需要 /~a 限定符" expected)]
+    ;; 限定符类型不匹配
+    [else
+     (format "谓词限定符错误: 期望 /~a，实际 /~a" expected actual-norm)]))
+

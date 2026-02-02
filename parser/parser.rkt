@@ -67,7 +67,9 @@
     [(cons mnem rest)
      (define-values (base suffix) (split-mnemonic mnem))
      (define operands (parse-operand-list rest))
-     (ast-ins base suffix operands no-srcloc)]))
+     (ast-ins base suffix operands no-srcloc)]
+    [_
+     (error 'parse-instruction "无效的指令格式，期望 (指令名 操作数...)，实际: ~a" sexp)]))
 
 ;; 从 syntax 对象解析 (带位置信息)
 (define (parse-instruction/stx stx)
@@ -77,7 +79,9 @@
     [(cons mnem rest)
      (define-values (base suffix) (split-mnemonic mnem))
      (define operands (parse-operand-list/stx (cdr (syntax->list stx))))
-     (ast-ins base suffix operands loc)]))
+     (ast-ins base suffix operands loc)]
+    [_
+     (error 'parse-instruction "无效的指令格式，期望 (指令名 操作数...)，实际: ~a" sexp)]))
 
 ;; 从 syntax 提取 srcloc
 (define (syntax->srcloc stx)
@@ -205,9 +209,10 @@
            (ast-label sym loc)))]))
 
 ;; 判断是否为显式寄存器组
+;; 支持单个或多个向量寄存器: {z0.B} 或 {z0.B z1.B}
 (define (reglist-sexp? sexp)
   (match sexp
-    [(list (? looks-like-vector-reg?) (? looks-like-vector-reg?) _ ...) #t]
+    [(list (? looks-like-vector-reg?) _ ...) #t]
     [_ #f]))
 
 (define (looks-like-vector-reg? sym)

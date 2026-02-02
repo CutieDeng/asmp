@@ -60,7 +60,8 @@
    emit-cfi?          ; boolean - 是否输出 CFI 指令
    align-operands?    ; boolean - 是否对齐操作数列
    skip-redundant-mov? ; boolean - 跳过冗余 mov (如 mov x0, x0)
-   max-line-width)    ; integer - 最大行宽 (用于注释换行)
+   max-line-width     ; integer - 最大行宽 (用于注释换行)
+   merge-colocated-labels?) ; boolean - 合并同位置的标签 (入口块局部标签合并到函数名)
   #:transparent)
 
 (define default-emit-config
@@ -73,7 +74,8 @@
    #f                 ; 不输出 CFI
    #f                 ; 不对齐操作数
    #f                 ; 不跳过冗余 mov (保留用户指令)
-   80))               ; 80 列宽
+   80                 ; 80 列宽
+   #f))               ; 不合并同位置标签
 
 (define apple-emit-config
   (emit-config
@@ -85,7 +87,8 @@
    #f                 ; 不输出 CFI
    #f                 ; 不对齐操作数
    #f                 ; 不跳过冗余 mov (保留用户指令)
-   80))               ; 80 列宽
+   80                 ; 80 列宽
+   #f))               ; 不合并同位置标签
 
 ;; 当前配置 (参数化)
 (define current-emit-config (make-parameter default-emit-config))
@@ -161,7 +164,32 @@
 ;; 直接写入端口版本
 (define (emit-operand/port op port)
   (match op
-    ;; 寄存器
+    ;; 寄存器 - 带 group-size 但无 index 的作为寄存器列表输出
+    ;; 有 index 的表示从组中选择单个寄存器，按普通寄存器输出
+    [(ast-reg kind id group-size index element _ _)
+     #:when (and group-size (>= group-size 1) (not index))
+     (port-write-string port "{ ")
+     (emit-reg/port op port)
+     ;; 如果 group-size > 1，输出范围表示法 (如 z0.B - z3.B)
+     (when (> group-size 1)
+       (port-write-string port " - ")
+       ;; 计算结束寄存器编号
+       (define end-id
+         (if (number? id)
+             (+ id group-size -1)
+             id))  ; 虚拟寄存器暂时不处理范围
+       (port-write-string port (symbol->string kind))
+       (if (number? end-id)
+           (port-display port end-id)
+           (begin
+             (port-write-string port ".")
+             (port-display port end-id)))
+       (when element
+         (port-write-string port ".")
+         (port-write-string port (symbol->string element))))
+     (port-write-string port " }")]
+
+    ;; 普通寄存器 (包括带 index 的)
     [(ast-reg _ _ _ _ _ _ _)
      (emit-reg/port op port)]
 
@@ -175,6 +203,12 @@
      (define fn-name (current-function-name))
      (define local-labels (current-function-labels))
      (cond
+       ;; 被合并的标签 -> 输出函数名
+       [(set-member? (merged-labels) name)
+        (define prefix (emit-config-label-prefix (current-emit-config)))
+        (unless (string=? prefix "")
+          (port-write-string port prefix))
+        (port-display port fn-name)]
        ;; 函数内的局部标签
        [(and fn-name (set-member? local-labels name))
         (port-write-string port (make-local-label fn-name name))]
@@ -391,10 +425,21 @@
 ;; 当前函数的局部标签集合 (用于区分局部/外部引用)
 (define current-function-labels (make-parameter (set)))
 
+;; 被合并到函数名的标签集合 (当 merge-colocated-labels? 启用时使用)
+(define merged-labels (make-parameter (set)))
+
+;; 局部标签名到唯一 ID 的映射 (用于处理转换后可能重名的情况)
+(define local-label-ids (make-parameter (hash)))
+
 ;; 生成局部标签名: L<func>$<label>
 ;; 使用 L 前缀使其成为局部标签（不导出到符号表）
+;; 自动转换不合法的字符，并确保唯一性
 (define (make-local-label fn-name label-name)
-  (format "L~a$~a" fn-name label-name))
+  (define sanitized-fn (sanitize-symbol fn-name))
+  (define ids (local-label-ids))
+  ;; 从预计算的映射中获取唯一标签名
+  (define unique-label (hash-ref ids label-name (sanitize-symbol label-name)))
+  (format "L~a$~a" sanitized-fn unique-label))
 
 ;; ============================================================
 ;; 函数输出 (高性能端口版本)
@@ -404,15 +449,45 @@
   (define config (current-emit-config))
   (define prefix (emit-config-label-prefix config))
   (define fn-name (asm-function-name fn))
+  (define merge-labels? (emit-config-merge-colocated-labels? config))
 
   ;; 收集函数内的所有局部标签
   (define local-labels
     (for/set ([kv (in-ordered-map (asm-function-label->id fn))])
       (car kv)))
 
+  ;; 计算需要合并的标签 (入口块的局部标签，且不等于函数名)
+  (define entry-id (asm-function-entry fn))
+  (define entry-label
+    (and entry-id (fn-get-label fn entry-id)))
+  (define labels-to-merge
+    (if (and merge-labels? entry-label (not (eq? entry-label fn-name)))
+        (set entry-label)
+        (set)))
+
+  ;; 预计算所有标签的唯一映射 (处理转换后可能重名的情况)
+  (define-values (label-id-map _used)
+    (for/fold ([ids (hash)]
+               [used-names (set)])
+              ([label (in-set local-labels)])
+      (define sanitized (sanitize-symbol label))
+      (define unique-name
+        (if (set-member? used-names sanitized)
+            ;; 需要添加后缀
+            (let loop ([i 1])
+              (define candidate (format "~a_~a" sanitized i))
+              (if (set-member? used-names candidate)
+                  (loop (add1 i))
+                  candidate))
+            sanitized))
+      (values (hash-set ids label unique-name)
+              (set-add used-names unique-name))))
+
   ;; 设置当前函数上下文
   (parameterize ([current-function-name fn-name]
-                 [current-function-labels local-labels])
+                 [current-function-labels local-labels]
+                 [merged-labels labels-to-merge]
+                 [local-label-ids label-id-map])
 
     ;; 获取函数对齐属性
     ;; = max(用户指定的对齐, 函数内部最大对齐)
@@ -441,7 +516,6 @@
       (port-newline port))
 
     ;; 按基本块顺序输出
-    (define entry-id (asm-function-entry fn))
     (define visited (make-hash))
 
     ;; BFS 遍历基本块
@@ -450,10 +524,12 @@
         (hash-set! visited (bb-id-val bb-id) #t)
         (define block (fn-get-block fn (bb-id-val bb-id)))
         (when block
-          ;; 标签 (非入口块)
-          (unless (equal? bb-id entry-id)
-            (define label (fn-get-label fn bb-id))
-            (when label
+          ;; 标签
+          (define label (fn-get-label fn bb-id))
+          (when label
+            ;; 跳过: 函数名标签、被合并的标签
+            (unless (or (eq? label fn-name)
+                        (set-member? labels-to-merge label))
               ;; 输出局部标签 (L<func>$<label>:)
               (port-write-string port (make-local-label fn-name label))
               (port-write-string port ":")
@@ -476,7 +552,9 @@
           (for ([succ (fn-successors fn bb-id)])
             (emit-block succ)))))
 
-    (emit-block entry-id)
+    ;; 只有非空函数才输出基本块
+    (when entry-id
+      (emit-block entry-id))
 
     (when (emit-config-emit-cfi? config)
       (port-write-string port ".cfi_endproc")

@@ -59,6 +59,7 @@
 (define asm-syntax (make-parameter 'gnu))  ; 'gnu | 'apple
 (define emit-cfi (make-parameter #f))
 (define skip-redundant-mov (make-parameter #f))  ; 默认保留所有指令
+(define merge-colocated-labels (make-parameter #f))  ; 合并同位置标签
 
 ;; 寄存器分配
 (define allow-spill (make-parameter #t))
@@ -76,6 +77,9 @@
 (define skip-validation (make-parameter #f))
 (define verify-save-load-flag (make-parameter #t))
 (define check-outside-function (make-parameter #t))  ; 检查函数外指令
+(define verify-label-refs-flag (make-parameter #t))  ; 检查标签引用
+(define verify-symbol-names-flag (make-parameter #t)) ; 检查符号名合法性
+(define pedantic-flag (make-parameter #f))           ; 严格检查（默认关闭）
 
 ;; ============================================================
 ;; 阶段定义
@@ -162,13 +166,66 @@
     [else
      (format "~a: 未知错误" (format-srcloc loc))]))
 
+;; 格式化标签引用错误
+(define (format-label-ref-error err)
+  (define label (label-ref-error-label err))
+  (define ins (label-ref-error-instruction err))
+  (define loc (label-ref-error-srcloc err))
+  (define fn-name (label-ref-error-function-name err))
+  (define defined (label-ref-error-defined-labels err))
+
+  (define base-msg
+    (format "~a: ~a: 未定义的标签 '~a'"
+            (format-srcloc loc)
+            (ast->string ins)
+            label))
+
+  (if (and (show-hints) (pair? defined))
+      (string-append base-msg "\n"
+                     (format "  提示: 函数 ~a 中已定义的标签: ~a"
+                             fn-name
+                             (string-join (map symbol->string defined) ", ")))
+      base-msg))
+
+;; 格式化符号名错误
+(define (format-symbol-name-error err)
+  (define sym (symbol-name-error-symbol err))
+  (define kind (symbol-name-error-kind err))
+  (define fn-name (symbol-name-error-function-name err))
+  (define reason (symbol-name-error-reason err))
+
+  (define kind-str (case kind [(function) "函数"] [(label) "标签"]))
+  (define sanitized (sanitize-symbol sym))
+
+  (define base-msg
+    (format "~a '~a': 符号名不合法" kind-str sym))
+
+  (if (show-hints)
+      (string-append base-msg "\n"
+                     (format "  提示: ~a" reason) "\n"
+                     (format "  建议: 改为 '~a'" sanitized))
+      base-msg))
+
+;; 格式化线性 fallthrough 警告
+(define (format-linear-fallthrough-warning w)
+  (define fn-name (linear-fallthrough-warning-function-name w))
+  (define count (linear-fallthrough-warning-instruction-count w))
+  (define last-ins (linear-fallthrough-warning-last-instruction w))
+  (define loc (linear-fallthrough-warning-srcloc w))
+
+  (define loc-str (if loc (format-srcloc loc) "<unknown>"))
+  (define ins-str (if last-ins (ast->string last-ins) "<none>"))
+
+  (format "~a: ~a: [pedantic] 函数 '~a' 可能 fall-through (~a 条指令，末尾无终止指令)"
+          loc-str ins-str fn-name count))
+
 ;; ============================================================
 ;; 阶段 1: 解析
 ;; ============================================================
 
 (struct parse-stage-result
   (items          ; (listof ast-node) - 成功解析的指令/directive
-   errors         ; (listof string) - 错误消息
+   errors         ; pvector of string - 错误消息
    raw-results)   ; parse-results - 原始结果
   #:transparent)
 
@@ -188,31 +245,32 @@
       (parse-result-instruction r)))
 
   (define validation-errors
-    (for/list ([r (in-list (parse-results-items results))]
+    (for/fold ([errs (pvector-empty)])
+              ([r (in-list (parse-results-items results))]
                #:when (not (parse-result-ok? r)))
-      (format-validation-error r)))
+      (pvector-cons-right errs (format-validation-error r))))
 
   ;; 检查函数外指令
   (define outside-function-errors
     (if (check-outside-function)
         (check-instructions-outside-function items input-file)
-        '()))
+        (pvector-empty)))
 
-  (define errors (append validation-errors outside-function-errors))
+  (define errors (pvector-append validation-errors outside-function-errors))
 
   (when (should-dump? 'ast)
     (dump-ast items))
 
   (when (>= (verbose-level) 1)
     (eprintf "  解析: ~a 条指令, ~a 个错误\n"
-             (length items) (length errors)))
+             (length items) (pvector-length errors)))
 
   (parse-stage-result items errors results))
 
 ;; 检查函数外的指令
-;; 返回错误消息列表
+;; 返回 pvector of 错误消息
 (define (check-instructions-outside-function items source)
-  (define errors '())
+  (define errors (box (pvector-empty)))
   (define in-function? #f)
 
   (for ([item (in-list items)])
@@ -229,12 +287,13 @@
       [(and (ast-ins? item) (not in-function?))
        (define loc (ast-srcloc item))
        (define loc-str (format-srcloc loc))
-       (set! errors
-             (cons (format "~a: ~a: 指令在函数定义外"
-                           loc-str (ast->string item))
-                   errors))]))
+       (set-box! errors
+                 (pvector-cons-right
+                  (unbox errors)
+                  (format "~a: ~a: 指令在函数定义外"
+                          loc-str (ast->string item))))]))
 
-  (reverse errors))
+  (unbox errors))
 
 (define (dump-ast items)
   (displayln ";; === AST Dump ===")
@@ -252,7 +311,7 @@
 (struct cfg-stage-result
   (cfg            ; control-flow-graph
    functions      ; (listof asm-function)
-   errors)        ; (listof string)
+   errors)        ; pvector of string
   #:transparent)
 
 (define (run-cfg-stage items input-file)
@@ -270,13 +329,59 @@
     (dump-cfg-info cfg))
 
   ;; 可选: 验证 save!/load!
-  (define errors
+  (define sv-errors
     (if (verify-save-load-flag)
-        (for/fold ([errs '()])
+        (for/fold ([errs (pvector-empty)])
                   ([fn (in-list functions)])
           (define info (verify-save-load fn))
-          (append (save-load-errors info) errs))
-        '()))
+          (for/fold ([e errs])
+                    ([err (in-list (save-load-errors info))])
+            (pvector-cons-right e err)))
+        (pvector-empty)))
+
+  ;; 可选: 验证标签引用
+  (define lr-errors
+    (if (verify-label-refs-flag)
+        (for/fold ([errs (pvector-empty)])
+                  ([fn (in-list functions)])
+          (pvector-append errs (verify-label-references fn cfg)))
+        (pvector-empty)))
+
+  ;; 可选: 验证符号名合法性
+  (define sn-errors
+    (if (verify-symbol-names-flag)
+        (for/fold ([errs (pvector-empty)])
+                  ([fn (in-list functions)])
+          (pvector-append errs (verify-symbol-names fn)))
+        (pvector-empty)))
+
+  ;; 格式化标签引用错误
+  (define label-ref-error-msgs
+    (for/fold ([msgs (pvector-empty)])
+              ([err (in-pvector lr-errors)])
+      (pvector-cons-right msgs (format-label-ref-error err))))
+
+  ;; 格式化符号名错误
+  (define symbol-name-error-msgs
+    (for/fold ([msgs (pvector-empty)])
+              ([err (in-pvector sn-errors)])
+      (pvector-cons-right msgs (format-symbol-name-error err))))
+
+  ;; Pedantic: 检查线性 fallthrough
+  (define pedantic-warnings
+    (if (pedantic-flag)
+        (for/fold ([warns (pvector-empty)])
+                  ([fn (in-list functions)])
+          (define w (check-linear-fallthrough fn))
+          (if w
+              (pvector-cons-right warns (format-linear-fallthrough-warning w))
+              warns))
+        (pvector-empty)))
+
+  (define errors (pvector-append sv-errors
+                                 (pvector-append label-ref-error-msgs
+                                                 (pvector-append symbol-name-error-msgs
+                                                                 pedantic-warnings))))
 
   (when (>= (verbose-level) 1)
     (eprintf "  CFG: ~a 个函数\n" fn-count))
@@ -298,7 +403,7 @@
 
 (struct regalloc-stage-result
   (results        ; (listof pipeline-result)
-   errors)        ; (listof string)
+   errors)        ; pvector of string
   #:transparent)
 
 (define (run-regalloc-stage functions)
@@ -318,9 +423,11 @@
       (run-pipeline fn config)))
 
   (define errors
-    (apply append
-           (for/list ([r (in-list results)])
-             (pipeline-result-errors r))))
+    (for/fold ([errs (pvector-empty)])
+              ([r (in-list results)])
+      (for/fold ([e errs])
+                ([err (in-list (pipeline-result-errors r))])
+        (pvector-cons-right e err))))
 
   (when (should-dump? 'liveness)
     (dump-liveness-info results))
@@ -408,7 +515,8 @@
   (define config
     (struct-copy emit-config base-config
                  [emit-cfi? (emit-cfi)]
-                 [skip-redundant-mov? (skip-redundant-mov)]))
+                 [skip-redundant-mov? (skip-redundant-mov)]
+                 [merge-colocated-labels? (merge-colocated-labels)]))
 
   (define assembly
     (parameterize ([current-emit-config config])
@@ -442,11 +550,11 @@
      (display content)]))
 
 (define (format-errors errors stage)
-  (if (null? errors)
+  (if (pvector-empty? errors)
       ""
       (string-append
        (format "\n=== ~a 阶段错误 ===\n" stage)
-       (string-join errors "\n")
+       (string-join (pvector->list errors) "\n")
        "\n")))
 
 ;; ============================================================
@@ -454,13 +562,13 @@
 ;; ============================================================
 
 (define (run-compiler input-file)
-  (define all-errors '())
+  (define all-errors (pvector-empty))
 
   ;; 阶段 1: 解析
   (define parse-result (run-parse-stage input-file))
-  (set! all-errors (append all-errors (parse-stage-result-errors parse-result)))
+  (set! all-errors (pvector-append all-errors (parse-stage-result-errors parse-result)))
 
-  (when (and (pair? (parse-stage-result-errors parse-result))
+  (when (and (not (pvector-empty? (parse-stage-result-errors parse-result)))
              (not (continue-on-error)))
     (display (format-errors (parse-stage-result-errors parse-result) "解析"))
     (exit 1))
@@ -478,9 +586,9 @@
   ;; 阶段 2: CFG
   (define cfg-result
     (run-cfg-stage (parse-stage-result-items parse-result) input-file))
-  (set! all-errors (append all-errors (cfg-stage-result-errors cfg-result)))
+  (set! all-errors (pvector-append all-errors (cfg-stage-result-errors cfg-result)))
 
-  (when (and (pair? (cfg-stage-result-errors cfg-result))
+  (when (and (not (pvector-empty? (cfg-stage-result-errors cfg-result)))
              (not (continue-on-error)))
     (display (format-errors (cfg-stage-result-errors cfg-result) "CFG"))
     (exit 1))
@@ -496,9 +604,9 @@
   ;; 阶段 3: 寄存器分配
   (define regalloc-result
     (run-regalloc-stage (cfg-stage-result-functions cfg-result)))
-  (set! all-errors (append all-errors (regalloc-stage-result-errors regalloc-result)))
+  (set! all-errors (pvector-append all-errors (regalloc-stage-result-errors regalloc-result)))
 
-  (when (and (pair? (regalloc-stage-result-errors regalloc-result))
+  (when (and (not (pvector-empty? (regalloc-stage-result-errors regalloc-result)))
              (not (continue-on-error)))
     (display (format-errors (regalloc-stage-result-errors regalloc-result) "寄存器分配"))
     (exit 1))
@@ -520,7 +628,7 @@
   (write-output (emit-stage-result-assembly emit-result))
 
   ;; 返回状态
-  (if (null? all-errors) 0 1))
+  (if (pvector-empty? all-errors) 0 1))
 
 ;; ============================================================
 ;; 命令行解析
@@ -590,6 +698,10 @@
       "消除冗余 mov 指令 (如 mov x0, x0)"
       (skip-redundant-mov #t)]
 
+     [("--merge-labels")
+      "合并同位置标签 (入口块标签合并到函数名)"
+      (merge-colocated-labels #t)]
+
      ;; 寄存器分配
      [("--no-spill")
       "禁止寄存器溢出 (分配失败则报错)"
@@ -626,6 +738,18 @@
       "允许函数定义外的指令"
       (check-outside-function #f)]
 
+     [("--no-verify-label-refs")
+      "不验证标签引用"
+      (verify-label-refs-flag #f)]
+
+     [("--no-verify-symbol-names")
+      "不验证符号名合法性"
+      (verify-symbol-names-flag #f)]
+
+     [("--pedantic")
+      "启用严格检查 (警告可疑的代码模式)"
+      (pedantic-flag #t)]
+
      ;; ABI 配置
      [("--default-abi") name
       "默认 ABI (如 aapcs64, leaf, naked)"
@@ -638,7 +762,29 @@
      #:args (input-file)
      input-file))
 
-  (exit (run-compiler input-file)))
+  ;; 捕获所有未处理的异常，提供友好的错误消息
+  (with-handlers
+    ([exn:fail?
+      (lambda (e)
+        (define msg (exn-message e))
+        ;; 清理错误消息
+        (define clean-msg
+          (cond
+            ;; 合约违规
+            [(regexp-match #rx"^([^:]+): contract violation" msg)
+             => (lambda (m)
+                  (format "内部错误: ~a 参数无效\n建议: 检查输入文件是否完整 (如缺少 end-function)" (cadr m)))]
+            ;; 其他错误
+            [else msg]))
+        (eprintf "\n=== 编译器错误 ===\n~a\n" clean-msg)
+        (when (>= (verbose-level) 2)
+          (eprintf "\n=== 详细堆栈 ===\n")
+          (for ([ctx (in-list (continuation-mark-set->context
+                               (exn-continuation-marks e)))])
+            (when (car ctx)
+              (eprintf "  ~a\n" (car ctx)))))
+        (exit 1))])
+    (exit (run-compiler input-file))))
 
 ;; ============================================================
 ;; 库接口 (供其他模块使用)
