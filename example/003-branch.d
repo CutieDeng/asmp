@@ -10,7 +10,7 @@
 ;; 条件分支
 ;; int64_t max(int64_t a, int64_t b) { return a > b ? a : b; }
 ;; ------------------------------------------------------------
-(: function max)
+(: function max (export))
 (: label entry)
   (cmp x0 x1)           ; 比较 a, b
   (b.gt use_a)          ; if a > b, goto use_a
@@ -27,7 +27,7 @@
 ;;   return s;
 ;; }
 ;; ------------------------------------------------------------
-(: function sum)
+(: function sum (export))
 (: label entry)
   ;; x0 = n
   (mov x1 0)            ; s = 0
@@ -46,7 +46,7 @@
 ;; ------------------------------------------------------------
 ;; do-while 循环 (更高效)
 ;; ------------------------------------------------------------
-(: function sum_dowhile)
+(: function sum_dowhile (export))
 (: label entry)
   ;; x0 = n
   (mov x1 0)            ; s = 0
@@ -63,7 +63,7 @@
 ;; ------------------------------------------------------------
 ;; 条件递增 (compare-and-branch)
 ;; ------------------------------------------------------------
-(: function increment_if_nonzero)
+(: function increment_if_nonzero (export))
 (: label entry)
   (ldr x1 (x0))
   (cbz x1 skip)         ; if (x1 == 0) goto skip
@@ -76,7 +76,7 @@
 ;; ------------------------------------------------------------
 ;; 位测试并分支
 ;; ------------------------------------------------------------
-(: function test_bit)
+(: function test_bit (export))
 (: label entry)
   ;; x0 = &flags, x1 = bit position
   (ldr x2 (x0))         ; x2 = *flags
@@ -95,7 +95,7 @@
 ;; ------------------------------------------------------------
 ;; switch-like 分支
 ;; ------------------------------------------------------------
-(: function decode)
+(: function decode (export))
 (: label entry)
   ;; x0 = op, x1 = a, x2 = b
   (cmp x0 2)            ; 范围检查

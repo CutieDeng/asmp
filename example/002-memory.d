@@ -10,7 +10,7 @@
 ;; 基础加载/存储
 ;; void swap(int64_t *a, int64_t *b)
 ;; ------------------------------------------------------------
-(: function swap)
+(: function swap (export))
 (: label entry)
   ;; x0 = &a, x1 = &b
   (ldr x2 (x0))         ; x2 = *a
@@ -25,7 +25,7 @@
 ;; int64_t get_field(struct S *p) { return p->field; }
 ;; 假设 field 在偏移 16
 ;; ------------------------------------------------------------
-(: function get_field)
+(: function get_field (export))
 (: label entry)
   (ldr x0 (x0 16))      ; x0 = *(x0 + 16)
   (ret)
@@ -35,7 +35,7 @@
 ;; 数组访问
 ;; int64_t array_get(int64_t *arr, int64_t idx)
 ;; ------------------------------------------------------------
-(: function array_get)
+(: function array_get (export))
 (: label entry)
   ;; x0 = arr, x1 = idx
   ;; 地址 = arr + idx * 8
@@ -47,7 +47,7 @@
 ;; 扩展寻址 (32位索引)
 ;; int64_t array_get32(int64_t *arr, int32_t idx)
 ;; ------------------------------------------------------------
-(: function array_get32)
+(: function array_get32 (export))
 (: label entry)
   ;; x0 = arr, w1 = idx (32位)
   (ldr x0 (x0 w1 sxtw 3)) ; 符号扩展 w1 到 64 位, 左移 3
@@ -58,7 +58,7 @@
 ;; Pre-index (更新基址)
 ;; void push(int64_t **sp, int64_t val)
 ;; ------------------------------------------------------------
-(: function push_val)
+(: function push_val (export))
 (: label entry)
   ;; x0 = &sp, x1 = val
   (ldr x2 (x0))         ; x2 = sp
@@ -71,7 +71,7 @@
 ;; 成对加载/存储
 ;; void copy_pair(int64_t *dst, int64_t *src)
 ;; ------------------------------------------------------------
-(: function copy_pair)
+(: function copy_pair (export))
 (: label entry)
   ;; x0 = dst, x1 = src
   (ldp x2 x3 (x1))      ; x2, x3 = src[0], src[1]
@@ -83,7 +83,7 @@
 ;; 32 位加载/存储
 ;; int32_t load32(int32_t *p) { return *p; }
 ;; ------------------------------------------------------------
-(: function load32)
+(: function load32 (export))
 (: label entry)
   (ldr w0 (x0))         ; 加载 32 位值
   (ret)
@@ -93,7 +93,7 @@
 ;; 符号/零扩展加载
 ;; int64_t load_byte_signed(int8_t *p) { return *p; }
 ;; ------------------------------------------------------------
-(: function load_byte_signed)
+(: function load_byte_signed (export))
 (: label entry)
   (ldrsb x0 (x0))       ; 加载字节并符号扩展到 64 位
   (ret)
@@ -103,7 +103,7 @@
 ;; 零扩展加载
 ;; uint64_t load_byte_unsigned(uint8_t *p) { return *p; }
 ;; ------------------------------------------------------------
-(: function load_byte_unsigned)
+(: function load_byte_unsigned (export))
 (: label entry)
   (ldrb w0 (x0))        ; 加载字节, 零扩展到 32 位
   (ret)                 ; 高 32 位自动清零

@@ -58,67 +58,49 @@
   (unbox *abi-cache*))
 
 ;; 解析 ABI 属性到 abi-config
+;;
+;; 配置格式:
+;;   (class num-regs banned preserved)  - 寄存器类: 位域表示 banned/preserved
+;;   (key . value)                      - 其他属性
 (define (parse-abi-props name props)
-  (define prop-hash
-    (for/hash ([p (in-list props)])
-      (match p
-        [(cons key value) (values key value)]
-        [_ (values #f #f)])))
+  ;; 按类型分拣
+  (define class-configs (make-hash))  ; symbol -> reg-class-config
+  (define other-props (make-hash))    ; symbol -> value
 
-  (define (get-prop key [default #f])
-    (hash-ref prop-hash key default))
+  (for ([p (in-list props)])
+    (match p
+      ;; (class num-regs banned preserved) — 寄存器类配置
+      [(list class-name num-regs banned preserved)
+       #:when (memq class-name '(gpr fpr pred))
+       (hash-set! class-configs class-name
+                  (make-reg-class-config
+                    #:num-regs num-regs
+                    #:banned (integer->bitset banned)
+                    #:preserved (integer->bitset preserved)))]
+      ;; (key . value) — 普通属性
+      [(cons key value)
+       (hash-set! other-props key value)]
+      [_ (void)]))
 
-  ;; 解析 GPR 配置
-  (define gpr-num (get-prop 'gpr-num-regs 31))
-  (define gpr-banned-list (get-prop 'gpr-banned '()))
-  (define gpr-preserved-range (get-prop 'gpr-preserved '()))
-
-  (define gpr-banned
-    (for/fold ([bs bitset-empty])
-              ([r (in-list gpr-banned-list)])
-      (bitset-add bs r)))
-
-  (define gpr-preserved
-    (match gpr-preserved-range
-      [(cons lo hi)
-       (for/fold ([bs bitset-empty])
-                 ([i (in-range lo hi)])
-         (bitset-add bs i))]
-      ['() bitset-empty]
-      [_ bitset-empty]))
-
-  ;; 解析 FPR 配置
-  (define fpr-num (get-prop 'fpr-num-regs 32))
-  (define fpr-banned-list (get-prop 'fpr-banned '()))
-  (define fpr-preserved-range (get-prop 'fpr-preserved '()))
-
-  (define fpr-banned
-    (for/fold ([bs bitset-empty])
-              ([r (in-list fpr-banned-list)])
-      (bitset-add bs r)))
-
-  (define fpr-preserved
-    (match fpr-preserved-range
-      [(cons lo hi)
-       (for/fold ([bs bitset-empty])
-                 ([i (in-range lo hi)])
-         (bitset-add bs i))]
-      ['() bitset-empty]
-      [_ bitset-empty]))
-
-  (define stack-align (get-prop 'stack-alignment 16))
-
-  ;; 构建配置
+  ;; 取出各类配置 (带默认值)
   (define gpr-cfg
-    (make-reg-class-config #:num-regs gpr-num
-                           #:banned gpr-banned
-                           #:preserved gpr-preserved))
+    (hash-ref class-configs 'gpr
+              (lambda () (make-reg-class-config #:num-regs 31))))
   (define fpr-cfg
-    (make-reg-class-config #:num-regs fpr-num
-                           #:banned fpr-banned
-                           #:preserved fpr-preserved))
+    (hash-ref class-configs 'fpr
+              (lambda () (make-reg-class-config #:num-regs 32))))
+  (define pred-cfg
+    (hash-ref class-configs 'pred
+              (lambda () (make-reg-class-config #:num-regs 16))))
 
-  (abi-config gpr-cfg fpr-cfg stack-align))
+  (abi-config gpr-cfg fpr-cfg pred-cfg))
+
+;; 整数位域 -> bitset
+(define (integer->bitset n)
+  (for/fold ([bs bitset-empty])
+            ([i (in-range 64)]  ; 最多 64 位
+             #:when (bitwise-bit-set? n i))
+    (bitset-add bs i)))
 
 ;; ============================================================
 ;; 查询
@@ -166,4 +148,4 @@
     (printf "\n~a:\n" name)
     (printf "  GPR 可分配: ~a\n" (reg-num-allocatable (abi-config-gpr cfg)))
     (printf "  FPR 可分配: ~a\n" (reg-num-allocatable (abi-config-fpr cfg)))
-    (printf "  栈对齐: ~a\n" (abi-config-stack-alignment cfg))))
+    (printf "  Pred 可分配: ~a\n" (reg-num-allocatable (abi-config-pred cfg)))))

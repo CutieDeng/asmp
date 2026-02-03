@@ -39,10 +39,14 @@
 ;;    load! → ldp/ldr 指令
 
 (require "../../semantic/control-flow.rkt"
+         "../../semantic/use-def.rkt"
          "../../parser/ast.rkt"
          "types.rkt"
          "allocator.rkt"
          "abi.rkt"
+         "abi-config.rkt"
+         "abi-infer.rkt"
+         "../../vendor/cutie-ftree/bitset.rkt"
          "../../vendor/cutie-ftree/pvector.rkt"
          "../../vendor/cutie-ftree/ordered-map.rkt"
          "../../vendor/cutie-ftree/comparator.rkt")
@@ -54,6 +58,7 @@
 
   ;; 分析
   analyze-save-load
+  analyze-pseudo-spill
 
   ;; 代码生成
   expand-save-load
@@ -93,7 +98,8 @@
    physical-regs    ; (listof integer) - 分配后的物理寄存器号
    reg-class        ; 'gpr | 'fpr - 寄存器类别
    stack-slots      ; (listof integer) - 栈槽偏移
-   size-spec)       ; size-spec
+   size-spec        ; size-spec
+   elided-regs)     ; (listof integer) - 假溢出的寄存器号（无需真正 save/load）
   #:transparent)
 
 ;; 分析上下文
@@ -182,7 +188,8 @@
        phys-regs
        reg-class
        slots
-       size-spec))
+       size-spec
+       '()))        ; elided-regs 稍后由假溢出分析填充
 
     (set! regions (cons region regions)))
 
@@ -293,16 +300,25 @@
   (struct-copy basic-block block [instructions new-instructions]))
 
 ;; 生成保存指令 (stp/str)
+;; 跳过 elided-regs 中的寄存器
 (define (generate-save-instructions result region config)
   (define phys-regs (save-region-physical-regs region))
   (define slots (save-region-stack-slots region))
   (define class (save-region-reg-class region))
   (define use-paired? (save-load-config-use-paired? config))
+  (define elided (save-region-elided-regs region))
+
+  ;; 过滤掉假溢出的寄存器
+  (define-values (active-regs active-slots)
+    (for/lists (rs ss) ([r (in-list phys-regs)]
+                         [s (in-list slots)]
+                         #:unless (member r elided))
+      (values r s)))
 
   (define kind (if (eq? class 'gpr) 'x 'v))
 
-  ;; 成对处理
-  (let loop ([regs phys-regs] [offs slots] [result result])
+  ;; 成对处理 (使用过滤后的 active-regs)
+  (let loop ([regs active-regs] [offs active-slots] [result result])
     (cond
       [(null? regs) result]
 
@@ -341,16 +357,25 @@
              (pvector-cons-right result str-ins))])))
 
 ;; 生成加载指令 (ldp/ldr)
+;; 跳过 elided-regs 中的寄存器
 (define (generate-load-instructions result region config)
   (define phys-regs (save-region-physical-regs region))
   (define slots (save-region-stack-slots region))
   (define class (save-region-reg-class region))
   (define use-paired? (save-load-config-use-paired? config))
+  (define elided (save-region-elided-regs region))
+
+  ;; 过滤掉假溢出的寄存器
+  (define-values (active-regs active-slots)
+    (for/lists (rs ss) ([r (in-list phys-regs)]
+                         [s (in-list slots)]
+                         #:unless (member r elided))
+      (values r s)))
 
   (define kind (if (eq? class 'gpr) 'x 'v))
 
-  ;; 成对处理
-  (let loop ([regs phys-regs] [offs slots] [result result])
+  ;; 成对处理 (使用过滤后的 active-regs)
+  (let loop ([regs active-regs] [offs active-slots] [result result])
     (cond
       [(null? regs) result]
 
@@ -387,3 +412,173 @@
 
        (loop (cdr regs) (cdr offs)
              (pvector-cons-right result ldr-ins))])))
+
+;; ============================================================
+;; 假溢出分析
+;; ============================================================
+;;
+;; 对每个 save/load 区间，检查物理寄存器是否被 def：
+;; - 如果区间内没有 def 该寄存器 → 假溢出（可以省略 save/load）
+;; - 如果有 def → 真溢出（必须 save/load）
+;;
+;; def 来源：
+;; 1. 普通指令的显式 def
+;; 2. bl/blr 调用：根据被调用函数的 ABI，scratch-reg 被隐式 def
+
+;; 分析假溢出，返回更新后的 save-load-context
+;; abi-info-map: hash[fn-name -> function-abi-info] 来自 infer-all-abis
+(define (analyze-pseudo-spill fn context abi-info-map)
+  (define new-regions
+    (for/list ([region (in-list (save-load-context-regions context))])
+      (define elided (find-elided-regs fn region abi-info-map))
+      (struct-copy save-region region [elided-regs elided])))
+
+  (struct-copy save-load-context context [regions new-regions]))
+
+;; 找出可以省略的寄存器
+;; 返回 (listof integer) — 不需要真正 save/load 的物理寄存器号
+(define (find-elided-regs fn region abi-info-map)
+  (define phys-regs (save-region-physical-regs region))
+  (define reg-class (save-region-reg-class region))
+  (define save-bb-id (save-region-save-bb-id region))
+  (define save-idx (save-region-save-ins-idx region))
+  (define load-bb-id (save-region-load-bb-id region))
+  (define load-idx (save-region-load-ins-idx region))
+
+  ;; 收集区间内所有被 def 的物理寄存器
+  (define def-set (collect-defs-in-region fn save-bb-id save-idx
+                                           load-bb-id load-idx
+                                           reg-class abi-info-map))
+
+  ;; 不在 def-set 中的寄存器可以省略
+  (for/list ([r (in-list phys-regs)]
+             #:unless (bitset-member? def-set r))
+    r))
+
+;; 收集区间内的 def 集合
+;; 简化版：保守地收集 save-block 从 save-idx 到块尾 + load-block 从块头到 load-idx
+;; TODO: 完整的 CFG 可达性分析
+(define (collect-defs-in-region fn save-bb-id save-idx load-bb-id load-idx
+                                  reg-class abi-info-map)
+  (define def-set bitset-empty)
+
+  ;; 如果在同一个块内
+  (if (equal? (bb-id-val save-bb-id) (bb-id-val load-bb-id))
+      ;; 同块：只扫描 save-idx+1 到 load-idx-1
+      (let ([block (fn-get-block fn save-bb-id)])
+        (when block
+          (set! def-set
+                (collect-block-defs (basic-block-instructions block)
+                                    (add1 save-idx) (sub1 load-idx)
+                                    reg-class abi-info-map def-set))))
+      ;; 不同块：保守地扫描所有可能的块
+      ;; 简化：扫描 save 块的后续 + load 块的前部
+      (begin
+        ;; save 块从 save-idx+1 到块尾
+        (let ([save-block (fn-get-block fn save-bb-id)])
+          (when save-block
+            (define ins-count (pvector-length (basic-block-instructions save-block)))
+            (set! def-set
+                  (collect-block-defs (basic-block-instructions save-block)
+                                      (add1 save-idx) (sub1 ins-count)
+                                      reg-class abi-info-map def-set))))
+
+        ;; load 块从块头到 load-idx-1
+        (let ([load-block (fn-get-block fn load-bb-id)])
+          (when load-block
+            (set! def-set
+                  (collect-block-defs (basic-block-instructions load-block)
+                                      0 (sub1 load-idx)
+                                      reg-class abi-info-map def-set))))
+
+        ;; TODO: 中间的块也需要扫描
+        ))
+
+  def-set)
+
+;; 收集块内指定范围的 def
+(define (collect-block-defs instructions start-idx end-idx reg-class abi-info-map def-set)
+  (for/fold ([defs def-set])
+            ([i (in-range (max 0 start-idx) (add1 (min end-idx (sub1 (pvector-length instructions)))))])
+    (define ins (pvector-ref instructions i))
+    (collect-ins-defs ins reg-class abi-info-map defs)))
+
+;; 收集单条指令的 def
+(define (collect-ins-defs ins reg-class abi-info-map def-set)
+  (cond
+    [(ast-ins? ins)
+     (define mnem (ast-ins-mnemonic ins))
+     (cond
+       ;; bl/blr 调用：scratch-reg 被隐式 def
+       [(memq mnem '(bl blr))
+        (define target (get-bl-target ins))
+        (define callee-abi (get-callee-scratch-def target abi-info-map))
+        (case reg-class
+          [(gpr) (bitset-union def-set (inferred-abi-gpr-def callee-abi))]
+          [(fpr) (bitset-union def-set (inferred-abi-fpr-def callee-abi))]
+          [(predicate) (bitset-union def-set (inferred-abi-pred-def callee-abi))]
+          [else def-set])]
+       ;; 其他指令：显式 def
+       [else
+        (define use-def (extract-use-def ins))
+        (for/fold ([defs def-set])
+                  ([ref (in-list (use-def-flat-defs use-def))])
+          (define-values (ref-class reg-num) (physical-reg-info-from-ref ref))
+          (if (and reg-num (eq? ref-class reg-class))
+              (bitset-add defs reg-num)
+              defs))])]
+    [else def-set]))
+
+;; 获取 bl 目标函数名
+(define (get-bl-target ins)
+  (define ops (ast-ins-operands ins))
+  (and (pair? ops)
+       (ast-label? (car ops))
+       (ast-label-name (car ops))))
+
+;; 获取被调用函数的 scratch def（会被破坏的寄存器）
+(define (get-callee-scratch-def target abi-info-map)
+  (cond
+    ;; 已知函数
+    [(and target (hash-ref abi-info-map target #f))
+     => (lambda (info)
+          (function-abi-info-inferred-abi info))]
+    ;; 未知函数：保守假设（使用默认 ABI 的 scratch-reg）
+    [else
+     (define default-abi (and (default-abi-name)
+                               (get-abi-by-name (default-abi-name))))
+     (if default-abi
+         (abi-to-scratch-def-local default-abi)
+         ;; 无默认 ABI：假设所有寄存器都可能被破坏
+         (inferred-abi (for/bitset ([i (in-range 31)]) i)
+                       (for/bitset ([i (in-range 32)]) i)
+                       (for/bitset ([i (in-range 16)]) i)))]))
+
+;; 将 abi-config 转换为 scratch def（与 abi-infer.rkt 中相同）
+(define (abi-to-scratch-def-local abi)
+  (define (class-scratch-def cfg)
+    (define num-regs (reg-class-config-num-regs cfg))
+    (define banned (reg-class-config-banned cfg))
+    (define preserved (reg-class-config-preserved cfg))
+    (define all-regs (for/bitset ([i (in-range num-regs)]) i))
+    (bitset-subtract (bitset-subtract all-regs banned) preserved))
+
+  (inferred-abi
+    (class-scratch-def (abi-config-gpr abi))
+    (class-scratch-def (abi-config-fpr abi))
+    (class-scratch-def (abi-config-pred abi))))
+
+;; 从 reg-ref 获取物理寄存器信息
+(define (physical-reg-info-from-ref ref)
+  (cond
+    [(ast-reg? ref)
+     (define rid (reg-ref->reg-id ref))
+     (cond
+       [(reg-id-virtual? rid) (values #f #f)]
+       [else
+        (define class (reg-id-class rid))
+        (define id (reg-id-id rid))
+        (if (integer? id)
+            (values class id)
+            (values #f #f))])]
+    [else (values #f #f)]))

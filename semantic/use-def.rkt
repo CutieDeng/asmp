@@ -225,6 +225,14 @@
     [(regexp-match? #rx"^(ld|ldr|lda|ldur)" mnem-str)
      (analyze-load-operands operands)]
 
+    ;; SHA1 加密指令：sha1c/sha1p/sha1m/sha1su0/sha1su1 第一个操作数是 def+use
+    ;; 这些指令读取并更新目标寄存器
+    [(regexp-match? #rx"^sha1(c|p|m|su0|su1)$" mnem-str)
+     (for/list ([op (in-list operands)]
+                [i (in-naturals)])
+       (make-operand-ref i (if (= i 0) 'def+use 'use)
+                    (extract-regs-from-operand op (if (= i 0) 'def+use 'use)) op))]
+
     ;; 默认：第一个是 def，其余是 use
     [else
      (for/list ([op (in-list operands)]

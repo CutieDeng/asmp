@@ -14,7 +14,7 @@
 ;; ============================================================
 
 ;; 默认对齐 (4 字节, .p2align 2)
-(: function sum_default)
+(: function sum_default (export))
   (mov x2 0)
 (: label loop1)
   (add x2 x2 x0)
@@ -25,7 +25,7 @@
 (: end-function)
 
 ;; 16 字节对齐 (.p2align 4) - 适合热点函数
-(: function sum_aligned (align 4))
+(: function sum_aligned (export) (align 4))
   (mov x2 0)
 (: label loop2)
   (add x2 x2 x0)
@@ -41,7 +41,7 @@
 
 ;; align 在循环体内，每次迭代前对齐
 ;; fallthrough 和跳转都会经过 nop 填充
-(: function loop_with_align)
+(: function loop_with_align (export))
   (mov x0 0)
   (mov x1 100)
 (: label loop)
@@ -57,7 +57,7 @@
 ;; ============================================================
 
 ;; 不同函数可以使用同名标签
-(: function func_a)
+(: function func_a (export))
   (mov x0 0)
 (: label loop)           ;; 生成 Lfunc_a$loop
   (add x0 x0 1)
@@ -66,7 +66,7 @@
   (ret)
 (: end-function)
 
-(: function func_b)
+(: function func_b (export))
   (mov x0 100)
 (: label loop)           ;; 生成 Lfunc_b$loop，不冲突
   (sub x0 x0 1)
@@ -78,7 +78,7 @@
 ;; 4. 条件分支后对齐
 ;; ============================================================
 
-(: function branch_example)
+(: function branch_example (export))
   (cmp x0 0)
   (b.eq is_zero)
   ;; 非零情况

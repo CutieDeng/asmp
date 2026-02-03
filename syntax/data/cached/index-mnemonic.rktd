@@ -2038,6 +2038,8 @@
 (movz
   ("MOVZ_32_movewide" "WZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm__18"))
   ("MOVZ_64_movewide" "XZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR__6" "imm__18"))
+  ("MOVZ_32_movewide_shift" "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
+  ("MOVZ_64_movewide_shift" "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))
 )
 
 (uabalt
@@ -4547,6 +4549,8 @@
 (movk
   ("MOVK_32_movewide" "WZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm__18"))
   ("MOVK_64_movewide" "XZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR__6" "imm__18"))
+  ("MOVK_32_movewide_shift" "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
+  ("MOVK_64_movewide_shift" "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))
 )
 
 (pacda

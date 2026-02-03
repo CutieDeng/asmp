@@ -4142,6 +4142,14 @@
       ("MOVZ_32_movewide" "WZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm__18"))
     )
   )
+  (c4
+    ((gpr-64 immediate unknown immediate)
+      ("MOVZ_64_movewide_shift" "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))
+    )
+    ((gpr-32 immediate unknown immediate)
+      ("MOVZ_32_movewide_shift" "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
+    )
+  )
 )
 
 (uabalt
@@ -9127,6 +9135,14 @@
     )
     ((gpr-32 immediate)
       ("MOVK_32_movewide" "WZR, UInteger" (("imm16" (imm-range 0 65535 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm__18"))
+    )
+  )
+  (c4
+    ((gpr-64 immediate unknown immediate)
+      ("MOVK_64_movewide_shift" "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))
+    )
+    ((gpr-32 immediate unknown immediate)
+      ("MOVK_32_movewide_shift" "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
     )
   )
 )

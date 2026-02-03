@@ -12,6 +12,7 @@
          "use-def.rkt"
          "../parser/ast.rkt"
          "../pipeline/regalloc/types.rkt"
+         "../pipeline/regalloc/abi-config.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt")
 
@@ -22,6 +23,7 @@
   *check-cross-class-naming*
   *check-memory-base-width*
   *check-virtual-name-format*
+  *check-abi-declaration*
   ;; 错误收集（供外部使用）
   semantic-error
   semantic-error?
@@ -44,6 +46,10 @@
 ;; 是否检查虚拟寄存器名称格式（默认开启）
 ;; 禁止以数字开头的变量名，如 z.0、p.123
 (define *check-virtual-name-format* (make-parameter #t))
+
+;; 是否检查 ABI 声明（默认开启）
+;; 每个使用虚拟寄存器的函数必须声明 ABI
+(define *check-abi-declaration* (make-parameter #t))
 
 ;; ============================================================
 ;; 错误结构
@@ -78,6 +84,8 @@
     (set! errors (append errors (check-cross-class-naming fn))))
   (when (*check-memory-base-width*)
     (set! errors (append errors (check-memory-base-width fn))))
+  (when (*check-abi-declaration*)
+    (set! errors (append errors (check-abi-declaration fn))))
   ;; 如果有错误，汇总报告
   (unless (null? errors)
     (report-all-errors errors))
@@ -300,6 +308,35 @@
             source-file line-num col-num reg-name suggestion))
 
   (semantic-error 'memory-base-width message loc))
+
+;; ============================================================
+;; ABI 声明检查
+;; ============================================================
+
+;; 检查函数是否声明了 ABI
+;; 规则:
+;;   - 函数有 (abi <name>) 属性 → 通过
+;;   - default-abi-name 参数已设置 → 通过
+;;   - 函数不使用虚拟寄存器 → 通过 (无需寄存器分配)
+;;   - 否则 → 错误
+(define (check-abi-declaration fn)
+  (define fn-name (asm-function-name fn))
+  (define abi-name (fn-get-info fn 'abi #f))
+  (cond
+    ;; 显式声明了 ABI
+    [abi-name '()]
+    ;; 有默认 ABI 参数
+    [(default-abi-name) '()]
+    ;; 无 ABI - 检查是否使用虚拟寄存器
+    [else
+     (define vars (collect-virtual-vars-with-locs fn))
+     (if (hash-empty? vars)
+         '()
+         (list (semantic-error
+                'missing-abi
+                (format "函数 '~a' 未声明 ABI (需要 (abi <name>) 属性，或使用 --default-abi 参数)"
+                        fn-name)
+                #f)))]))
 
 ;; ============================================================
 ;; 指令格式化 (AST -> 源码字符串)

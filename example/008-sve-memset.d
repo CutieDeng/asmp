@@ -17,7 +17,7 @@
 ;; ============================================================
 ;; SVE memset 主函数
 ;; ============================================================
-(: function sve_memset)
+(: function sve_memset (export))
 (: label entry)
     ;; 检查 n == 0
     (cbz x2 done)
@@ -56,7 +56,7 @@
 ;; ============================================================
 ;; 简化版本: 固定填充 0 的 memzero
 ;; ============================================================
-(: function sve_memzero)
+(: function sve_memzero (export))
 (: label entry)
     (cbz x1 zero_done)
 
@@ -82,7 +82,7 @@
 ;; 使用 PTRUE 的简单版本 (无边界检查优化)
 ;; 适用于已知对齐且大小是向量长度倍数的情况
 ;; ============================================================
-(: function sve_memset_aligned)
+(: function sve_memset_aligned (export))
 (: label entry)
     (cbz x2 aligned_done)
 

@@ -331,11 +331,17 @@
     (port-display port suffix))
 
   ;; 操作数
+  ;; 注意: shift/extend 操作数后面的 amount 用空格分隔，不用逗号
   (unless (null? operands)
     (port-write-string port " ")
     (for ([op (in-list operands)]
+          [prev (in-list (cons #f operands))]  ; 前一个操作数
           [i (in-naturals)])
-      (when (> i 0) (port-write-string port ", "))
+      ;; 在操作数之间加逗号，但 shift/extend 后面只加空格
+      (when (> i 0)
+        (if (or (ast-shift? prev) (ast-extend? prev))
+            (port-write-string port " ")    ; 空格: LSL #16
+            (port-write-string port ", "))) ; 逗号: w1, #123
       (emit-operand/port op port))))
 
 ;; 返回字符串版本 (兼容)
@@ -355,12 +361,8 @@
   (define prefix (emit-config-label-prefix config))
 
   (case kind
-    ;; 函数开始
+    ;; 函数开始 (旧兼容路径 - 不输出 .globl，由 emit-function/port 根据 export 属性处理)
     [(function)
-     (port-write-string port ".globl ")
-     (port-write-string port prefix)
-     (port-display port name)
-     (port-newline port)
      (when (eq? (emit-config-syntax config) 'apple)
        (port-write-string port ".p2align 2")
        (port-newline port))
@@ -500,11 +502,13 @@
     (define internal-align (fn-get-info fn 'max-internal-align 2))
     (define fn-align (max user-align internal-align))
 
-    ;; 函数头
-    (port-write-string port ".globl ")
-    (port-write-string port prefix)
-    (port-display port fn-name)
-    (port-newline port)
+    ;; 函数头 - 仅在有 (export) 属性时输出 .globl
+    (define is-export? (fn-get-info fn 'export #f))
+    (when is-export?
+      (port-write-string port ".globl ")
+      (port-write-string port prefix)
+      (port-display port fn-name)
+      (port-newline port))
 
     ;; 对齐指令 (使用函数属性或默认值)
     (port-write-string port ".p2align ")

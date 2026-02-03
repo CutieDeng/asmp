@@ -19,16 +19,20 @@
   reg-banned?
   reg-preserved?
   reg-num-allocatable
+  reg-num-scratch
 
   ;; ABI 配置
   (struct-out abi-config)
+  abi-scratch-only
 
   ;; 预定义 ABI
   arm64-abi
   arm64-gpr-config
   arm64-fpr-config
+  arm64-pred-config
 
   ;; 颜色映射
+  abi-get-class-config
   abi-color->reg
   abi-reg->color)
 
@@ -79,6 +83,10 @@
 (define (reg-num-allocatable cfg)
   (bitset-count (reg-allocatable cfg)))
 
+;; scratch-reg 数量 (可自由使用，不需要保存)
+(define (reg-num-scratch cfg)
+  (bitset-count (reg-caller-saved cfg)))
+
 ;; ============================================================
 ;; ABI 配置
 ;; ============================================================
@@ -86,8 +94,38 @@
 (struct abi-config
   (gpr              ; reg-class-config
    fpr              ; reg-class-config
-   stack-alignment) ; integer
+   pred)            ; reg-class-config (predicate registers)
   #:transparent)
+
+;; 创建只允许 scratch-reg 的 ABI (把 callee-saved 加入 banned)
+(define (abi-scratch-only abi)
+  (define gpr-cfg (abi-config-gpr abi))
+  (define fpr-cfg (abi-config-fpr abi))
+  (define pred-cfg (abi-config-pred abi))
+
+  ;; 把 preserved (callee-saved) 加入 banned
+  (define new-gpr-cfg
+    (make-reg-class-config
+      #:num-regs (reg-class-config-num-regs gpr-cfg)
+      #:banned (bitset-union (reg-class-config-banned gpr-cfg)
+                             (reg-class-config-preserved gpr-cfg))
+      #:preserved bitset-empty))
+
+  (define new-fpr-cfg
+    (make-reg-class-config
+      #:num-regs (reg-class-config-num-regs fpr-cfg)
+      #:banned (bitset-union (reg-class-config-banned fpr-cfg)
+                             (reg-class-config-preserved fpr-cfg))
+      #:preserved bitset-empty))
+
+  (define new-pred-cfg
+    (make-reg-class-config
+      #:num-regs (reg-class-config-num-regs pred-cfg)
+      #:banned (bitset-union (reg-class-config-banned pred-cfg)
+                             (reg-class-config-preserved pred-cfg))
+      #:preserved bitset-empty))
+
+  (abi-config new-gpr-cfg new-fpr-cfg new-pred-cfg))
 
 ;; ============================================================
 ;; 颜色映射
@@ -101,21 +139,22 @@
   (for/vector ([reg (in-bitset alloc)])
     reg))
 
+(define (abi-get-class-config abi class)
+  (case class
+    [(gpr) (abi-config-gpr abi)]
+    [(fpr) (abi-config-fpr abi)]
+    [(predicate) (abi-config-pred abi)]
+    [else #f]))
+
 (define (abi-color->reg abi class color)
-  (define cfg (case class
-                [(gpr) (abi-config-gpr abi)]
-                [(fpr) (abi-config-fpr abi)]
-                [else #f]))
+  (define cfg (abi-get-class-config abi class))
   (and cfg
        (let ([map (build-color-map cfg)])
          (and (< color (vector-length map))
               (vector-ref map color)))))
 
 (define (abi-reg->color abi class reg-num)
-  (define cfg (case class
-                [(gpr) (abi-config-gpr abi)]
-                [(fpr) (abi-config-fpr abi)]
-                [else #f]))
+  (define cfg (abi-get-class-config abi class))
   (and cfg
        (let ([map (build-color-map cfg)])
          (for/first ([i (in-range (vector-length map))]
@@ -138,5 +177,14 @@
     #:banned bitset-empty       ; 无禁用
     #:preserved (bitset-range 8 16)))   ; v8-v15 callee-saved
 
+;; SVE Predicate 寄存器配置
+;; p0-p15: 16 个 predicate 寄存器
+;; AAPCS64: 全部 caller-saved (无 preserved)
+(define arm64-pred-config
+  (make-reg-class-config
+    #:num-regs 16               ; p0-p15
+    #:banned bitset-empty       ; 无禁用
+    #:preserved bitset-empty))  ; 全部 caller-saved
+
 (define arm64-abi
-  (abi-config arm64-gpr-config arm64-fpr-config 16))
+  (abi-config arm64-gpr-config arm64-fpr-config arm64-pred-config))

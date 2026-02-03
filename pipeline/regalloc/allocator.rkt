@@ -520,16 +520,25 @@
                                               (allocator-state-spilled-nodes st))]))))))
 
 (define (compute-callee-saved-colors abi class)
-  (define cfg (case class
-                [(gpr) (abi-config-gpr abi)]
-                [(fpr) (abi-config-fpr abi)]
-                [else #f]))
+  (define cfg (abi-get-class-config abi class))
   (if cfg
       (let* ([callee-saved-regs (reg-callee-saved cfg)]
              [allocatable-regs (reg-allocatable cfg)])
         (for/bitset ([color (in-naturals)]
                      [phys-reg (in-bitset allocatable-regs)]
                      #:when (bitset-member? callee-saved-regs phys-reg))
+          color))
+      bitset-empty))
+
+;; 计算 caller-saved 颜色 (优先分配这些)
+(define (compute-caller-saved-colors abi class)
+  (define cfg (abi-get-class-config abi class))
+  (if cfg
+      (let* ([caller-saved-regs (reg-caller-saved cfg)]
+             [allocatable-regs (reg-allocatable cfg)])
+        (for/bitset ([color (in-naturals)]
+                     [phys-reg (in-bitset allocatable-regs)]
+                     #:when (bitset-member? caller-saved-regs phys-reg))
           color))
       bitset-empty))
 

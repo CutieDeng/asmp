@@ -82,12 +82,25 @@
 (struct multi-class-ig
   (gpr             ; class-ig | #f
    fpr             ; class-ig | #f
-   pred)           ; class-ig | #f
+   pred            ; class-ig | #f
+   effective-abi)  ; abi-config - 实际使用的 ABI (可能是 scratch-only)
   #:transparent)
 
 ;; ============================================================
 ;; 构建干涉图
 ;; ============================================================
+
+;; 检查函数是否有 save! 声明
+(define (fn-has-save-directive? fn)
+  (define found #f)
+  (fn-for-each-block fn
+    (lambda (block)
+      (unless found
+        (for ([ins (in-pvector (basic-block-instructions block))])
+          (when (and (ast-directive? ins)
+                     (eq? (ast-directive-kind ins) 'save!))
+            (set! found #t))))))
+  found)
 
 (define (build-interference-graphs fn liveness #:abi [abi arm64-abi])
   ;; 按 class 分组所有寄存器
@@ -115,26 +128,35 @@
   ;; 收集跨调用活跃信息
   (define live-across-call (collect-live-across-call fn liveness index-reg))
 
+  ;; 检查是否有 save! 声明，决定可用寄存器范围
+  ;; 没有 save! 时只能使用 scratch-reg，不能使用 callee-saved
+  (define has-save? (fn-has-save-directive? fn))
+  (define effective-abi (if has-save? abi (abi-scratch-only abi)))
+
+  (define gpr-num-colors (reg-num-allocatable (abi-config-gpr effective-abi)))
+  (define fpr-num-colors (reg-num-allocatable (abi-config-fpr effective-abi)))
+  (define pred-num-colors (reg-num-allocatable (abi-config-pred effective-abi)))
+
   ;; 构建各类干涉图
   (define gpr-ig
     (if (null? gpr-regs) #f
         (build-class-ig 'gpr (reverse gpr-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        (reg-num-allocatable (abi-config-gpr abi)))))
+                        gpr-num-colors)))
 
   (define fpr-ig
     (if (null? fpr-regs) #f
         (build-class-ig 'fpr (reverse fpr-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        (reg-num-allocatable (abi-config-fpr abi)))))
+                        fpr-num-colors)))
 
   (define pred-ig
     (if (null? pred-regs) #f
         (build-class-ig 'predicate (reverse pred-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        16)))  ; p0-p15
+                        pred-num-colors)))
 
-  (multi-class-ig gpr-ig fpr-ig pred-ig))
+  (multi-class-ig gpr-ig fpr-ig pred-ig effective-abi))
 
 ;; 构建单类干涉图
 (define (build-class-ig class reg-pairs fn liveness

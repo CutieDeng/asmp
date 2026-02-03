@@ -31,6 +31,7 @@
          "../semantic/save-verify.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
+         "../pipeline/regalloc/abi-infer.rkt"
          "../codegen/emit.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
@@ -406,21 +407,56 @@
    errors)        ; pvector of string
   #:transparent)
 
-(define (run-regalloc-stage functions)
+;; 解析函数的 ABI 名称 → abi-config
+;; 优先使用函数属性 (abi <name>)，其次 --default-abi 参数
+(define (resolve-function-abi fn)
+  (define fn-name (asm-function-name fn))
+  (define abi-name
+    (or (fn-get-info fn 'abi #f)
+        (default-abi-name)))
+  (cond
+    [(not abi-name) #f]
+    [else
+     (load-abi-config)
+     (define abi (get-abi-by-name abi-name))
+     (unless abi
+       (error 'regalloc
+              "函数 '~a' 的 ABI '~a' 未在配置文件中定义" fn-name abi-name))
+     abi]))
+
+(define (run-regalloc-stage cfg functions)
   (when (>= (verbose-level) 1)
     (eprintf "阶段 3: 寄存器分配\n"))
 
-  (define config
-    (make-pipeline-config
-     #:spill (if (allow-spill)
-                 default-spill-config
-                 (spill-config #f 0 'none))
-     #:max-iters (max-regalloc-iters)
-     #:debug-level (regalloc-debug)))
+  ;; 预加载 ABI 配置
+  (load-abi-config)
+
+  ;; 推断所有函数的 ABI（用于假溢出分析和 ABI 验证）
+  (define abi-info-map (infer-all-abis cfg))
+
+  ;; 检查 ABI 推断/验证错误
+  (define abi-errors
+    (for/fold ([errs '()])
+              ([(fn-name info) (in-hash abi-info-map)])
+      (append errs (function-abi-info-errors info))))
+
+  (when (and (pair? abi-errors) (>= (verbose-level) 1))
+    (for ([err (in-list abi-errors)])
+      (eprintf "警告: ~a\n" err)))
 
   (define results
     (for/list ([fn (in-list functions)])
-      (run-pipeline fn config)))
+      (define abi (or (resolve-function-abi fn) arm64-abi))
+      (define config
+        (make-pipeline-config
+         #:abi abi
+         #:spill (if (allow-spill)
+                     default-spill-config
+                     (spill-config #f 0 'none))
+         #:max-iters (max-regalloc-iters)
+         #:debug-level (regalloc-debug)))
+      ;; 运行 pipeline 并传入 abi-info-map 用于假溢出分析
+      (run-pipeline-with-abi-info fn config abi-info-map)))
 
   (define errors
     (for/fold ([errs (pvector-empty)])
@@ -603,7 +639,8 @@
 
   ;; 阶段 3: 寄存器分配
   (define regalloc-result
-    (run-regalloc-stage (cfg-stage-result-functions cfg-result)))
+    (run-regalloc-stage (cfg-stage-result-cfg cfg-result)
+                        (cfg-stage-result-functions cfg-result)))
   (set! all-errors (pvector-append all-errors (regalloc-stage-result-errors regalloc-result)))
 
   (when (and (not (pvector-empty? (regalloc-stage-result-errors regalloc-result)))

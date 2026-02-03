@@ -4367,3 +4367,15 @@
 ("FMSUB_H_floatdp3" fmsub "HUInteger, HUInteger, HUInteger, HUInteger" (("Rm" (reg-range 0 31)) ("Ra" (reg-range 0 31)) ("Rn" (reg-range 0 31)) ("Rd" (reg-range 0 31))) ("Hd" "Hn__5" "Hm__2" "Ha__2"))
 ("FNMADD_H_floatdp3" fnmadd "HUInteger, HUInteger, HUInteger, HUInteger" (("Rm" (reg-range 0 31)) ("Ra" (reg-range 0 31)) ("Rn" (reg-range 0 31)) ("Rd" (reg-range 0 31))) ("Hd" "Hn__5" "Hm__2" "Ha"))
 ("FNMSUB_H_floatdp3" fnmsub "HUInteger, HUInteger, HUInteger, HUInteger" (("Rm" (reg-range 0 31)) ("Ra" (reg-range 0 31)) ("Rn" (reg-range 0 31)) ("Rd" (reg-range 0 31))) ("Hd" "Hn__5" "Hm__2" "Ha__2"))
+
+;; ============================================================
+;; 手动添加: movz/movk 带 shift 的变体
+;; ============================================================
+;; ARM64 movz/movk 支持可选的 LSL #shift 参数
+;; MRS 把这部分作为 optional，默认提取时被忽略
+;; 这里手动添加 4 操作数形式
+
+("MOVZ_32_movewide_shift" movz "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
+("MOVZ_64_movewide_shift" movz "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))
+("MOVK_32_movewide_shift" movk "WZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 1 1)) ("Rd" (reg-range 0 31))) ("WdOrWZR" "imm" "lsl" "shift"))
+("MOVK_64_movewide_shift" movk "XZR, UInteger, lsl, UInteger" (("imm16" (imm-range 0 65535 1)) ("hw" (imm-range 0 3 1)) ("Rd" (reg-range 0 31))) ("XdOrXZR" "imm" "lsl" "shift"))

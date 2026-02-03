@@ -11,7 +11,7 @@
 ;; ------------------------------------------------------------
 ;; 显式 ABI 声明
 ;; ------------------------------------------------------------
-(: function explicit_abi (abi aapcs64))
+(: function explicit_abi (export) (abi aapcs64))
 (: label entry)
   (add x0 x0 x1 lsl 0)
   (ret)
@@ -20,7 +20,7 @@
 ;; ------------------------------------------------------------
 ;; 叶函数 - 不调用其他函数，可优化
 ;; ------------------------------------------------------------
-(: function leaf_func (abi leaf))
+(: function leaf_func (export) (abi leaf))
 (: label entry)
   ;; 叶函数不需要保存 LR
   (madd x0 x0 x1 xzr)     ; x0 = x0 * x1
@@ -30,7 +30,7 @@
 ;; ------------------------------------------------------------
 ;; 裸函数 - 完全手动控制
 ;; ------------------------------------------------------------
-(: function naked_func (abi naked))
+(: function naked_func (export) (abi naked))
 (: label entry)
   ;; 无自动序言/尾声，需要手动管理栈
   (stp x29 x30 (sp -16 !))
@@ -44,7 +44,7 @@
 ;; ------------------------------------------------------------
 ;; 使用默认 ABI (由 --default-abi 指定)
 ;; ------------------------------------------------------------
-(: function use_default)
+(: function use_default (export))
 (: label entry)
   (mov x0 42)
   (ret)
@@ -53,7 +53,7 @@
 ;; ------------------------------------------------------------
 ;; 多属性
 ;; ------------------------------------------------------------
-(: function multi_attr (abi aapcs64) (inline) (noinline))
+(: function multi_attr (export) (abi aapcs64) (inline) (noinline))
 (: label entry)
   (mov x0 0)
   (ret)

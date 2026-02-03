@@ -601,7 +601,12 @@
 (define (layer2-hints mnem actual-sig actual-class l2-sigs)
   (define result '())
 
-  ;; 首先检查添加 lsl 0 后是否可行 (放在最前面，最有用)
+  ;; 首先检查智能建议（最有用）
+  (define smart-hint (generate-smart-suggestion mnem actual-sig))
+  (when smart-hint
+    (set! result (cons smart-hint result)))
+
+  ;; 检查添加 lsl 0 后是否可行
   (define suffix-hint (check-suffix-hint mnem actual-sig actual-class))
   (when suffix-hint
     (set! result (cons suffix-hint result)))
@@ -618,6 +623,26 @@
       (set! result (cons (hint:type-mismatch (add1 i) exp act) result))))
 
   (reverse result))
+
+;; 生成智能建议 - 根据常见错误模式给出具体建议
+(define (generate-smart-suggestion mnem actual-sig)
+  (match (list mnem actual-sig)
+    ;; mov 向量, 立即数 → 建议 movi 或 dup
+    [(list 'mov (list (or 'simd-vector 'simd-v) 'immediate))
+     (validation-hint 'smart-suggestion
+       "向量加载立即数请用 movi (如 movi v0.8b, #1) 或 dup (如 dup v0.8b, w0)")]
+
+    ;; mov 向量, 向量 → 建议正确的 mov 格式
+    [(list 'mov (list (or 'simd-vector 'simd-v) (or 'simd-vector 'simd-v)))
+     (validation-hint 'smart-suggestion
+       "向量复制请确保排列一致 (如 mov v0.16b, v1.16b)")]
+
+    ;; add 向量, 向量, 立即数 → 建议正确格式
+    [(list 'add (list (or 'simd-vector 'simd-v) (or 'simd-vector 'simd-v) 'immediate))
+     (validation-hint 'smart-suggestion
+       "向量加法不支持立即数，请用寄存器 (如 add v0.4s, v1.4s, v2.4s)")]
+
+    [_ #f]))
 
 ;; 检查添加 lsl 0 后缀是否能匹配
 (define (check-suffix-hint mnem actual-sig actual-class)
@@ -769,15 +794,37 @@
                           "\n"))))
       "\n")]))
 
+;; 操作数类型的用户友好名称
+(define (friendly-type-name t)
+  (match t
+    ['gpr-64 "64位通用寄存器 (x0-x30)"]
+    ['gpr-32 "32位通用寄存器 (w0-w30)"]
+    ['simd-scalar "SIMD标量 (b/h/s/d/q)"]
+    ['simd-vector "SIMD向量 (v0.8b等)"]
+    ['simd-v "SIMD向量 (v0.8b等)"]  ; 别名中的简化类型
+    ['simd-element "SIMD向量元素 (v0.s[0])"]
+    ['sve-z "SVE向量 (z0.b等)"]
+    ['sve-p "SVE谓词 (p0)"]
+    ['immediate "立即数"]
+    ['negimm "负立即数"]
+    ['memory "内存地址 [...]"]
+    ['reg-list "寄存器列表 {...}"]
+    ['keyword "关键字 (lsl/lsr等)"]
+    ['label "标签"]
+    [_ (symbol->string t)]))
+
 ;; 格式化单个提示
 (define (format-hint hint)
   (match hint
+    [(validation-hint 'smart-suggestion msg)
+     (format "  建议: ~a" msg)]
     [(validation-hint 'suffix ops)
      (format "    - 可添加后缀: ~a" ops)]
     [(validation-hint 'similar-mnemonic mnems)
      (format "    - 您是否想要: ~a" (string-join (map symbol->string mnems) ", "))]
     [(validation-hint 'type-mismatch (list idx exp act))
-     (format "    - 操作数 ~a: 期望 ~a, 实际 ~a" idx exp act)]
+     (format "    - 操作数 ~a: 期望 ~a, 实际 ~a"
+             idx (friendly-type-name exp) (friendly-type-name act))]
     [(validation-hint 'operand-count 'too-few)
      "    - 可能少写了操作数"]
     [(validation-hint 'operand-count 'too-many)

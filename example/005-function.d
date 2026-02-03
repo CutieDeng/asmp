@@ -18,7 +18,7 @@
 ;; 叶函数不需要保存 LR, 可以简化
 ;; int64_t leaf_add(int64_t a, int64_t b) { return a + b; }
 ;; ------------------------------------------------------------
-(: function leaf_add)
+(: function leaf_add (export))
 (: label entry)
   (add x0 x0 x1 lsl 0)
   (ret)                 ; 直接返回, 不需要恢复 LR
@@ -28,7 +28,7 @@
 ;; 非叶函数 - 标准序言/尾声
 ;; 需要保存 FP 和 LR
 ;; ------------------------------------------------------------
-(: function non_leaf_example)
+(: function non_leaf_example (export))
 (: label entry)
   ;; === 序言 (prologue) ===
   ;; 保存 FP 和 LR, 建立栈帧
@@ -48,7 +48,7 @@
 ;; ------------------------------------------------------------
 ;; 保存被调用者保存的寄存器
 ;; ------------------------------------------------------------
-(: function callee_saved_example)
+(: function callee_saved_example (export))
 (: label entry)
   ;; 序言: 保存 FP, LR, x19, x20
   (stp x29 x30 (sp -32 !))
@@ -73,7 +73,7 @@
 ;; ------------------------------------------------------------
 ;; 带栈局部变量的函数
 ;; ------------------------------------------------------------
-(: function locals_example)
+(: function locals_example (export))
 (: label entry)
   ;; 栈布局 (16 字节对齐):
   ;;   sp+24: local2
@@ -104,7 +104,7 @@
 ;; 多参数函数 (超过 8 个参数通过栈传递)
 ;; 参数: x0-x7 = a-h, 栈上 = i
 ;; ------------------------------------------------------------
-(: function many_args)
+(: function many_args (export))
 (: label entry)
   ;; 累加前 8 个参数
   (add x0 x0 x1 lsl 0)      ; a + b
@@ -126,7 +126,7 @@
 ;; 尾调用优化
 ;; 直接跳转到目标函数，不保存返回地址
 ;; ------------------------------------------------------------
-(: function tail_call_example)
+(: function tail_call_example (export))
 (: label entry)
   (cbz x0 return_zero)
   (sub x0 x0 1)
@@ -136,7 +136,7 @@
   (ret)
 (: end-function)
 
-(: function helper)
+(: function helper (export))
 (: label entry)
   (add x0 x0 1)
   (ret)

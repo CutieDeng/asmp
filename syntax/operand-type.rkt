@@ -367,6 +367,10 @@
     [(and (eq? ast-type 'simd-scalar) (eq? template-type 'simd-element)) #t]
     [(and (eq? ast-type 'simd-element) (eq? template-type 'simd-scalar)) #t]
 
+    ;; simd-v (别名简化类型) 与 simd-vector 兼容
+    [(and (eq? ast-type 'simd-vector) (eq? template-type 'simd-v)) #t]
+    [(and (eq? ast-type 'simd-v) (eq? template-type 'simd-vector)) #t]
+
     ;; prefetch-op 可以匹配 keyword
     [(and (eq? ast-type 'keyword) (eq? template-type 'prefetch-op)) #t]
     [(and (eq? ast-type 'prefetch-op) (eq? template-type 'keyword)) #t]

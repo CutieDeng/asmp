@@ -14,6 +14,7 @@
          "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
          "../pipeline/pipeline.rkt"
+         "../pipeline/regalloc/abi-config.rkt"
          "../codegen/emit.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt")
@@ -175,19 +176,21 @@
       (check-true (<= (count-instructions asm "mov") 1)
                   "合并后应减少 mov 指令"))
 
-    (test-case "跨调用活跃 → callee-saved"
+    (test-case "跨调用活跃 → callee-saved (有 save!)"
       (define source "
 (: function call_test)
 (: label entry)
+  (: save! x.before x.other)
   (mov x.before 100)
   (mov x.other 200)
   (bl helper)
   (add x0 x.before x.other)
+  (: load! x.before x.other)
   (ret)
 (: end-function)
 ")
       (define asm (compile-to-asm source))
-      ;; 跨调用活跃的变量应分配到 x19-x28
+      ;; 有 save! 声明，跨调用活跃的变量应分配到 callee-saved x19-x28
       (check-pred (lambda (s) (asm-contains? s "x(19|20|21|22|23|24|25|26|27|28)")) asm
                   "跨调用活跃应分配到 callee-saved 寄存器"))
 
@@ -475,7 +478,9 @@
 ;; ============================================================
 
 (module+ main
-  (run-tests integration-tests))
+  (parameterize ([default-abi-name 'aapcs64])
+    (run-tests integration-tests)))
 
 (module+ test
-  (run-tests integration-tests))
+  (parameterize ([default-abi-name 'aapcs64])
+    (run-tests integration-tests)))

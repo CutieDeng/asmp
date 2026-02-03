@@ -46,7 +46,7 @@
 ;; 指令重写
 ;; ============================================================
 
-(define (rewrite-function fn alloc-result)
+(define (rewrite-function fn alloc-result #:abi [abi arm64-abi])
   (define assignment (alloc-result-assignment alloc-result))
   (define spilled (alloc-result-spilled alloc-result))
   (define coalesced (alloc-result-coalesced alloc-result))
@@ -62,22 +62,22 @@
               ([kv (in-ordered-map (asm-function-blocks fn))])
       (define bb-id-val (car kv))
       (define block (cdr kv))
-      (define new-block (rewrite-block block assignment coalesced spill-map))
+      (define new-block (rewrite-block block assignment coalesced spill-map abi))
       (ordered-map-set blocks bb-id-val new-block)))
 
   (struct-copy asm-function fn [blocks new-blocks]))
 
-(define (rewrite-block block assignment coalesced spill-map)
+(define (rewrite-block block assignment coalesced spill-map abi)
   (define instructions (basic-block-instructions block))
   (define rewritten-instructions
     (for/fold ([result (pvector-empty)])
               ([ins (in-pvector instructions)])
       (if (ast-ins? ins)
-          (rewrite-instruction ins result assignment coalesced spill-map)
+          (rewrite-instruction ins result assignment coalesced spill-map abi)
           (pvector-cons-right result ins))))
   (struct-copy basic-block block [instructions rewritten-instructions]))
 
-(define (rewrite-instruction ins result assignment coalesced spill-map)
+(define (rewrite-instruction ins result assignment coalesced spill-map abi)
   (define use-def (extract-use-def ins))
   (define uses (use-def-flat-uses use-def))
   (define defs (use-def-flat-defs use-def))
@@ -94,12 +94,12 @@
 
   (cond
     [(or (not (null? loads-needed)) (not (null? stores-needed)))
-     (rewrite-with-spill ins result assignment coalesced spill-map loads-needed stores-needed)]
+     (rewrite-with-spill ins result assignment coalesced spill-map loads-needed stores-needed abi)]
     [else
-     (define new-ins (substitute-registers ins assignment coalesced))
+     (define new-ins (substitute-registers ins assignment coalesced abi))
      (pvector-cons-right result new-ins)]))
 
-(define (rewrite-with-spill ins result assignment coalesced spill-map loads-needed stores-needed)
+(define (rewrite-with-spill ins result assignment coalesced spill-map loads-needed stores-needed abi)
   ;; 临时寄存器池
   ;; GPR: x16, x17 (IP registers)
   ;; FPR: v16-v23 (caller-saved, not argument registers)
@@ -147,7 +147,7 @@
               ([kv (in-ordered-map temp-map)])
       (ordered-map-set m (car kv) (cdr kv))))
 
-  (define new-ins (substitute-registers ins extended-assignment coalesced))
+  (define new-ins (substitute-registers ins extended-assignment coalesced abi))
   (define result-with-ins (pvector-cons-right result-with-loads new-ins))
 
   (for/fold ([r result-with-ins])
@@ -186,15 +186,15 @@
 ;; 寄存器替换
 ;; ============================================================
 
-(define (substitute-registers ins assignment coalesced)
+(define (substitute-registers ins assignment coalesced abi)
   (match ins
     [(ast-ins mnem suffix operands loc)
      (ast-ins mnem suffix
-              (map (lambda (op) (substitute-operand op assignment coalesced)) operands)
+              (map (lambda (op) (substitute-operand op assignment coalesced abi)) operands)
               loc)]
     [_ ins]))
 
-(define (substitute-operand op assignment coalesced)
+(define (substitute-operand op assignment coalesced abi)
   (match op
     [(ast-reg kind id group-size index element pred-mode loc)
      (define width (case kind [(x) 64] [(w) 32] [(z v q) 128] [(d) 64] [(s) 32] [(h) 16] [(b) 8] [else 64]))
@@ -208,7 +208,7 @@
            (cond
              ;; Found a mapping - could be a color or direct physical register number
              [color-or-phys
-              (let ([phys-num (abi-color->reg arm64-abi class color-or-phys)])
+              (let ([phys-num (abi-color->reg abi class color-or-phys)])
                 (if phys-num
                     (ast-reg kind phys-num group-size index element pred-mode loc)
                     ;; abi-color->reg returned #f, use as direct physical number (for temps)
@@ -221,12 +221,12 @@
          op)]
 
     [(ast-mem base offset index-mode shift extend loc)
-     (ast-mem (substitute-operand base assignment coalesced)
-              (if offset (substitute-operand offset assignment coalesced) #f)
+     (ast-mem (substitute-operand base assignment coalesced abi)
+              (if offset (substitute-operand offset assignment coalesced abi) #f)
               index-mode shift extend loc)]
 
     [(ast-reglist regs loc)
-     (ast-reglist (map (lambda (r) (substitute-operand r assignment coalesced)) regs) loc)]
+     (ast-reglist (map (lambda (r) (substitute-operand r assignment coalesced abi)) regs) loc)]
 
     [_ op]))
 

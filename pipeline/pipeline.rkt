@@ -20,6 +20,7 @@
   ;; 主流水线
   run-pipeline
   run-regalloc-pipeline
+  run-pipeline-with-abi-info
 
   ;; 流水线配置
   (struct-out pipeline-config)
@@ -86,7 +87,12 @@
 (define (run-pipeline fn [config default-pipeline-config])
   (run-regalloc-pipeline fn config))
 
-(define (run-regalloc-pipeline fn [config default-pipeline-config])
+;; 带 ABI 信息的流水线（用于假溢出分析）
+(define (run-pipeline-with-abi-info fn config abi-info-map)
+  (run-regalloc-pipeline fn config #:abi-info-map abi-info-map))
+
+(define (run-regalloc-pipeline fn [config default-pipeline-config]
+                                #:abi-info-map [abi-info-map #f])
   ;; 0. 前端语义验证
   (validate-function fn)
 
@@ -121,7 +127,9 @@
         (printf "  Predicate 顶点: ~a\n" (simple-graph-vertex-count (class-ig-graph (mig-pred mig))))))
 
     ;; 3. 图着色分配（各类独立分配）
-    (define multi-result (allocate-all-registers mig #:abi abi))
+    ;; 使用 effective-abi（考虑 save! 声明）
+    (define effective-abi (multi-class-ig-effective-abi mig))
+    (define multi-result (allocate-all-registers mig #:abi effective-abi))
     (define alloc-result (merge-alloc-results multi-result))
     (define spilled (alloc-result-spilled alloc-result))
 
@@ -140,16 +148,23 @@
                                          (pvector-length spilled))))]
          ;; 允许溢出 - 重写并重新分配
          [else
-          (define rewritten-fn (rewrite-function current-fn alloc-result))
+          (define rewritten-fn (rewrite-function current-fn alloc-result #:abi effective-abi))
           (loop rewritten-fn (add1 iter))])]
 
       ;; 无溢出 - 完成
       [else
        ;; 4. 重写虚拟寄存器为物理寄存器
-       (define rewritten-fn (rewrite-function current-fn alloc-result))
+       (define rewritten-fn (rewrite-function current-fn alloc-result #:abi effective-abi))
 
        ;; 5. 处理 save!/load! 指令
-       (define sl-context (analyze-save-load rewritten-fn alloc-result))
+       (define sl-context-raw (analyze-save-load rewritten-fn alloc-result))
+
+       ;; 5.1 假溢出分析（如果有 ABI 信息）
+       (define sl-context
+         (if abi-info-map
+             (analyze-pseudo-spill rewritten-fn sl-context-raw abi-info-map)
+             sl-context-raw))
+
        (define final-fn
          (if (null? (save-load-context-regions sl-context))
              rewritten-fn
@@ -159,7 +174,13 @@
          (printf "save!/load! 区域: ~a\n"
                  (length (save-load-context-regions sl-context)))
          (printf "save!/load! 栈空间: ~a 字节\n"
-                 (save-load-context-total-stack-size sl-context)))
+                 (save-load-context-total-stack-size sl-context))
+         ;; 显示假溢出信息
+         (for ([region (in-list (save-load-context-regions sl-context))])
+           (define elided (save-region-elided-regs region))
+           (unless (null? elided)
+             (printf "  区域 ~a: 假溢出寄存器 ~a\n"
+                     (save-region-id region) elided))))
 
        (define spill-slots (compute-spill-slots spilled))
        (define save-load-size (save-load-context-total-stack-size sl-context))
