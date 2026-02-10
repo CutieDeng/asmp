@@ -153,7 +153,7 @@
 ;; ============================================================
 
 (module+ main
-  (run-tests class-tests))
+  (void (run-tests class-tests)))
 
 (module+ test
-  (run-tests class-tests))
+  (void (run-tests class-tests)))

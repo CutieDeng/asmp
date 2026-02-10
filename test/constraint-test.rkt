@@ -207,7 +207,7 @@
 ;; ============================================================
 
 (module+ main
-  (run-tests constraint-tests))
+  (void (run-tests constraint-tests)))
 
 (module+ test
-  (run-tests constraint-tests))
+  (void (run-tests constraint-tests)))

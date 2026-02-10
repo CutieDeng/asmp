@@ -14,7 +14,7 @@
 
 (not ((c3 (sve-p sve-p sve-p)) eor (0 2 2 2)))
 
-(cinc ((c2 (gpr-32 gpr-64)) csinc (0 0 (zr 32) (const 0))) ((c2 (gpr-64 gpr-64)) csinc (0 0 (zr 64) (const 0))))
+(cinc ((c3 (gpr-32 gpr-64 cond-code)) csinc (0 0 (zr 32) (const 0))) ((c3 (gpr-64 gpr-64 cond-code)) csinc (0 0 (zr 64) (const 0))))
 
 (umull ((c3 (gpr-64 gpr-32 gpr-32)) umaddl (0 1 2 (zr 64))))
 
@@ -38,7 +38,7 @@
 
 (trcit ((c1 (gpr-64)) sys ((const 0) (const 0) (const 0) (const 0))))
 
-(cset ((c1 (gpr-32)) csinc (0 (zr 32) (zr 32) (const 0))) ((c1 (gpr-64)) csinc (0 (zr 64) (zr 64) (const 0))))
+(cset ((c2 (gpr-32 cond-code)) csinc (0 (zr 32) (zr 32) (const 0))) ((c2 (gpr-64 cond-code)) csinc (0 (zr 64) (zr 64) (const 0))))
 
 (uxth ((c2 (gpr-32 gpr-32)) ubfm (0 1 (const 0) (const 0))))
 
@@ -78,7 +78,7 @@
 
 (stseth ((c2 (gpr-32 gpr-64)) ldseth ((zr 64) 0 (const 0))))
 
-(csetm ((c1 (gpr-32)) csinv (0 (zr 32) (zr 32) (const 0))) ((c1 (gpr-64)) csinv (0 (zr 64) (zr 64) (const 0))))
+(csetm ((c2 (gpr-32 cond-code)) csinv (0 (zr 32) (zr 32) (const 0))) ((c2 (gpr-64 cond-code)) csinv (0 (zr 64) (zr 64) (const 0))))
 
 (orn ((c3 (sve-z sve-z immediate)) orr (2 1 (const 0))))
 
@@ -282,11 +282,11 @@
 
 (gcspushx ((c4 (immediate immediate immediate immediate)) sys (0 1 2 3)))
 
-(cneg ((c2 (gpr-32 gpr-64)) csneg (0 0 (zr 32) (const 0))) ((c2 (gpr-64 gpr-64)) csneg (0 0 (zr 64) (const 0))))
+(cneg ((c3 (gpr-32 gpr-64 cond-code)) csneg (0 0 (zr 32) (const 0))) ((c3 (gpr-64 gpr-64 cond-code)) csneg (0 0 (zr 64) (const 0))))
 
 (smstop ((c1 (immediate)) msr (0)))
 
-(cinv ((c2 (gpr-32 gpr-64)) csinv (0 0 (zr 32) (const 0))) ((c2 (gpr-64 gpr-64)) csinv (0 0 (zr 64) (const 0))))
+(cinv ((c3 (gpr-32 gpr-64 cond-code)) csinv (0 0 (zr 32) (const 0))) ((c3 (gpr-64 gpr-64 cond-code)) csinv (0 0 (zr 64) (const 0))))
 
 (stuminlh ((c2 (gpr-32 gpr-64)) lduminlh ((zr 64) 0 (const 0))))
 

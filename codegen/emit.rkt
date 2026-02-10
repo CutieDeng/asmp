@@ -145,6 +145,12 @@
     (port-write-string port ".")
     (port-display port element))
 
+  ;; 添加 lane index (SIMD 元素访问，无 group-size 时)
+  (when (and index (not group-size))
+    (port-write-string port "[")
+    (port-display port index)
+    (port-write-string port "]"))
+
   ;; 添加谓词模式
   (case pred-mode
     [(m) (port-write-string port "/m")]
@@ -301,7 +307,17 @@
      (port-write-string port "]")
      (when offset
        (port-write-string port ", ")
-       (emit-operand/port offset port))]))
+       (emit-operand/port offset port))]
+
+    ;; SVE: [base, #imm, mul vl]
+    [(sve-vl)
+     (port-write-string port "[")
+     (emit-reg/port base port)
+     (when offset
+       (port-write-string port ", ")
+       (emit-operand/port offset port)
+       (port-write-string port ", mul vl"))
+     (port-write-string port "]")]))
 
 ;; ============================================================
 ;; 指令输出

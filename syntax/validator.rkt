@@ -130,10 +130,12 @@
 
        ;; === 阶段 2: 检查 Layer1 ===
        [(not (member actual-class l1-classes))
+        (define actual-count (get-pre-count actual-class))
+        (define allowed-counts (remove-duplicates (map get-pre-count l1-classes)))
         (make-error 'layer1 mnem actual-class actual-sig
-                    (format "~a 结构是 ~a，但只支持: ~a"
-                            mnem actual-class
-                            (string-join (map symbol->string l1-classes) "/"))
+                    (format "~a 有 ~a 个操作数，但支持: ~a 个"
+                            mnem actual-count
+                            (string-join (map number->string (sort allowed-counts <)) "/"))
                     (layer1-hints actual-class l1-classes))]
 
        [else
@@ -235,7 +237,7 @@
 
 ;; 应用转换规则
 ;; transform-rule: (elem ...)
-;; elem: N (索引) | (zr size) | (const val) | (bitnot N)
+;; elem: N (索引) | (zr size) | (const val) | (bitnot N) | (invert-cond N)
 (define (apply-transform transform-rule operands ins)
   (define loc (ast-ins-loc ins))
   (for/list ([elem (in-list transform-rule)])
@@ -255,6 +257,13 @@
          [(ast-imm value orig-loc)
           (ast-imm (bitwise-not value) orig-loc)]
          [_ orig-op])]
+      ;; 条件码翻转 - 用于 cset → csinc
+      [(list 'invert-cond idx)
+       (define orig-op (list-ref operands idx))
+       (match orig-op
+         [(ast-cond code orig-loc)
+          (ast-cond (invert-condition code) orig-loc)]
+         [_ orig-op])]
       ;; 常量
       [(list 'const val)
        (cond
@@ -267,6 +276,19 @@
          [else
           (ast-label (symbol->string val) #f loc)])]
       [_ (ast-imm 0 loc)])))
+
+;; 条件码翻转表
+(define (invert-condition cond)
+  (case cond
+    [(eq) 'ne] [(ne) 'eq]
+    [(cs hs) 'cc] [(cc lo) 'cs]
+    [(mi) 'pl] [(pl) 'mi]
+    [(vs) 'vc] [(vc) 'vs]
+    [(hi) 'ls] [(ls) 'hi]
+    [(ge) 'lt] [(lt) 'ge]
+    [(gt) 'le] [(le) 'gt]
+    [(al) 'nv] [(nv) 'al]
+    [else cond]))
 
 ;; ============================================================
 ;; 辅助函数

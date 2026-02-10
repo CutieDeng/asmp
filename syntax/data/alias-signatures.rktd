@@ -14,7 +14,7 @@
 
 (not ((c3 (sve-p sve-p sve-p))))
 
-(cinc ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
+(cinc ((c3 (gpr-32 gpr-64 cond-code)) (c3 (gpr-64 gpr-64 cond-code))))
 
 (umull ((c3 (gpr-64 gpr-32 gpr-32))))
 
@@ -38,7 +38,7 @@
 
 (trcit ((c1 (gpr-64))))
 
-(cset ((c1 (gpr-32)) (c1 (gpr-64))))
+(cset ((c2 (gpr-32 cond-code)) (c2 (gpr-64 cond-code))))
 
 (uxth ((c2 (gpr-32 gpr-32))))
 
@@ -78,7 +78,7 @@
 
 (stseth ((c2 (gpr-32 gpr-64))))
 
-(csetm ((c1 (gpr-32)) (c1 (gpr-64))))
+(csetm ((c2 (gpr-32 cond-code)) (c2 (gpr-64 cond-code))))
 
 (orn ((c3 (sve-z sve-z immediate))))
 
@@ -282,11 +282,11 @@
 
 (gcspushx ((c4 (immediate immediate immediate immediate))))
 
-(cneg ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
+(cneg ((c3 (gpr-32 gpr-64 cond-code)) (c3 (gpr-64 gpr-64 cond-code))))
 
 (smstop ((c1 (immediate))))
 
-(cinv ((c2 (gpr-32 gpr-64)) (c2 (gpr-64 gpr-64))))
+(cinv ((c3 (gpr-32 gpr-64 cond-code)) (c3 (gpr-64 gpr-64 cond-code))))
 
 (stuminlh ((c2 (gpr-32 gpr-64))))
 

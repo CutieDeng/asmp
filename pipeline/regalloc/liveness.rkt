@@ -40,19 +40,27 @@
 ;; 收集变量
 ;; ============================================================
 
+;; 收集所有变量 (纯函数式版本)
+;; 使用 ordered-map 自动去重并保持排序
 (define (collect-all-variables fn)
-  (define vars (mutable-set))
-  (fn-for-each-block fn
-    (lambda (block)
-      (for ([ins (in-pvector (basic-block-instructions block))])
-        (when (ast-ins? ins)
-          (define use-def (extract-use-def ins))
-          (for ([ref (in-list (use-def-flat-defs use-def))])
-            (set-add! vars (reg-ref->reg-id ref)))
-          (for ([ref (in-list (use-def-flat-uses use-def))])
-            (set-add! vars (reg-ref->reg-id ref)))))))
-  (sort (set->list vars)
-        (lambda (a b) (eq? (reg-id-compare a b) '<))))
+  (define var-map
+    (for*/fold ([m (ordered-map-empty reg-id-compare)])
+               ([kv (in-ordered-map (asm-function-blocks fn))]
+                [ins (in-pvector (basic-block-instructions (cdr kv)))]
+                #:when (ast-ins? ins))
+      (define use-def (extract-use-def ins))
+      (define m1
+        (for/fold ([acc m])
+                  ([ref (in-list (use-def-flat-defs use-def))])
+          (define rid (reg-ref->reg-id ref))
+          (ordered-map-set acc rid #t)))
+      (for/fold ([acc m1])
+                ([ref (in-list (use-def-flat-uses use-def))])
+        (define rid (reg-ref->reg-id ref))
+        (ordered-map-set acc rid #t))))
+  ;; ordered-map 已按 reg-id-compare 排序，提取键
+  (for/list ([kv (in-ordered-map var-map)])
+    (car kv)))
 
 (define (build-var-index-map vars)
   (for/fold ([reg-index (ordered-map-empty reg-id-compare)]

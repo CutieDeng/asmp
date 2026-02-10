@@ -148,47 +148,53 @@
                                          (pvector-length spilled))))]
          ;; 允许溢出 - 重写并重新分配
          [else
-          (define rewritten-fn (rewrite-function current-fn alloc-result #:abi effective-abi))
+          (define rewritten-fn (rewrite-function current-fn alloc-result
+                                                  #:abi effective-abi
+                                                  #:abi-info-map abi-info-map))
           (loop rewritten-fn (add1 iter))])]
 
       ;; 无溢出 - 完成
       [else
        ;; 4. 重写虚拟寄存器为物理寄存器
-       (define rewritten-fn (rewrite-function current-fn alloc-result #:abi effective-abi))
+       (define rewritten-fn (rewrite-function current-fn alloc-result
+                                               #:abi effective-abi
+                                               #:abi-info-map abi-info-map))
 
        ;; 5. 处理 save!/load! 指令
-       (define sl-context-raw (analyze-save-load rewritten-fn alloc-result))
+       (define sl-context (analyze-save-load rewritten-fn alloc-result
+                                              #:abi effective-abi))
 
-       ;; 5.1 假溢出分析（如果有 ABI 信息）
-       (define sl-context
-         (if abi-info-map
-             (analyze-pseudo-spill rewritten-fn sl-context-raw abi-info-map)
-             sl-context-raw))
+       ;; 检查是否有 save!/load!
+       (define has-save-load?
+         (> (save-load-context-total-stack-size sl-context) 0))
 
        (define final-fn
-         (if (null? (save-load-context-regions sl-context))
-             rewritten-fn
-             (expand-save-load rewritten-fn sl-context)))
+         (if has-save-load?
+             (expand-save-load rewritten-fn sl-context)
+             rewritten-fn))
 
-       (when (and debug? (not (null? (save-load-context-regions sl-context))))
-         (printf "save!/load! 区域: ~a\n"
-                 (length (save-load-context-regions sl-context)))
+       (when (and debug? has-save-load?)
          (printf "save!/load! 栈空间: ~a 字节\n"
                  (save-load-context-total-stack-size sl-context))
-         ;; 显示假溢出信息
-         (for ([region (in-list (save-load-context-regions sl-context))])
-           (define elided (save-region-elided-regs region))
-           (unless (null? elided)
-             (printf "  区域 ~a: 假溢出寄存器 ~a\n"
-                     (save-region-id region) elided))))
+         (when (> (save-load-context-sve-stack-slots sl-context) 0)
+           (printf "save!/load! SVE 栈空间: ~a VL 单位\n"
+                   (save-load-context-sve-stack-slots sl-context))))
+
+       ;; 输出栈平衡警告 (到 stderr)
+       (define sl-warnings (save-load-context-errors sl-context))
+       (for ([w (in-list sl-warnings)])
+         (eprintf "~a\n" w))
 
        (define spill-slots (compute-spill-slots spilled))
        (define save-load-size (save-load-context-total-stack-size sl-context))
        (define frame-size (+ (compute-frame-size spill-slots) save-load-size))
 
+       ;; 收集错误
+       (define all-errors (save-load-context-errors sl-context))
+
        (pipeline-result final-fn liveness mig alloc-result multi-result
                         spill-slots frame-size iter
-                        (save-load-context-errors sl-context))])))
+                        all-errors)])))
 
 ;; 从 simple-graph 模块获取顶点数
 (require "../vendor/cutie-ftree/simple-graph.rkt")

@@ -267,8 +267,8 @@
 
 (module+ main
   (parameterize ([current-directory project-root])
-    (run-tests validator-tests)))
+    (void (run-tests validator-tests))))
 
 (module+ test
   (parameterize ([current-directory project-root])
-    (run-tests validator-tests)))
+    (void (run-tests validator-tests))))

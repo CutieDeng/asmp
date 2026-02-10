@@ -479,8 +479,8 @@
 
 (module+ main
   (parameterize ([default-abi-name 'aapcs64])
-    (run-tests integration-tests)))
+    (void (run-tests integration-tests))))
 
 (module+ test
   (parameterize ([default-abi-name 'aapcs64])
-    (run-tests integration-tests)))
+    (void (run-tests integration-tests))))

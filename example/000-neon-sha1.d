@@ -24,7 +24,7 @@
 ;; 输出:
 ;;   state[0..4] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0}
 
-(: function sha1_init (export))
+(: function sha1_init (export) (abi aapcs64))
 (: label entry)
   ;; SHA1 IV 常量 (使用虚拟寄存器)
   ;; H0 = 0x67452301
@@ -68,7 +68,7 @@
 ;; 输出:
 ;;   state 被原地更新
 
-(: function sha1_consume (export))
+(: function sha1_consume (export) (abi aapcs64))
 (: label entry)
   ;; 直接 tail call，签名相同，无需保存/恢复任何寄存器
   (b sha1_block)
@@ -98,119 +98,125 @@
 ;;   3. 追加 64-bit 大端 total_bits
 ;;   4. 如果剩余空间不够，需要额外一个块
 
-(: function sha1_digest (export))
+(: function sha1_digest (export) (abi aapcs64))
 (: label entry)
-  ;; 保存 callee-saved 寄存器和参数
-  (stp x29 x30 (sp -64 !))
-  (mov x29 sp)
-  (stp x19 x20 (sp 16))
-  (stp x21 x22 (sp 32))
-  (stp x23 x24 (sp 48))
+  ;; (: save! all) 自动包含:
+  ;; 1. SP 调整
+  ;; 2. 保存 x29, x30
+  ;; 3. 保存其他使用的 callee-saved 寄存器
+  (: save! all)
 
-  ;; 保存参数到 callee-saved 寄存器
-  (mov x19 x0)              ; x19 = state
-  (mov x20 x1)              ; x20 = data
-  (mov x21 x2)              ; x21 = total_bits
-  (mov x22 x3)              ; x22 = digest
+  ;; 建立栈帧
+  (mov x29 sp)
+
+  ;; 保存参数到虚拟寄存器
+  ;; 寄存器分配器会自动选择合适的物理寄存器
+  ;; save! all 会自动保存使用到的 callee-saved 寄存器
+  (mov x.state x0)
+  (mov x.data x1)
+  (mov x.total_bits x2)
+  (mov x.digest x3)
 
   ;; 计算剩余字节数: remaining = (total_bits / 8) % 64
-  (ubfm x24 x21 3 8)        ; x24 = remaining
+  (ubfm x.remaining x.total_bits 3 8)
 
   ;; 分配 128 字节栈空间用于 padding 块
   (sub sp sp 128)
 
-  ;; 清零 padding 区域 (2 个 64 字节块)
-  (movi v0.16b 0)
-  (stp q0 q0 (sp))
-  (stp q0 q0 (sp 32))
-  (stp q0 q0 (sp 64))
-  (stp q0 q0 (sp 96))
+  ;; 清零 padding 区域 (2 个 64 字节块) - 使用向量并行
+  (movi v.zero.16b 0)
+  (stp q.zero q.zero (sp))
+  (stp q.zero q.zero (sp 32))
+  (stp q.zero q.zero (sp 64))
+  (stp q.zero q.zero (sp 96))
 
   ;; 复制剩余数据到栈
-  (mov x0 sp)               ; dst = padding buffer
-  (mov x1 x20)              ; src = data
-  (mov x2 x24)              ; len = remaining
-  (cbz x2 skip_copy)
+  (mov x.dst sp)
+  (mov x.src x.data)
+  (mov x.len x.remaining)
+  (cbz x.len skip_copy)
 (: label copy_loop)
-  (ldrb w3 (x1))
-  (strb w3 (x0))
-  (add x0 x0 1)
-  (add x1 x1 1)
-  (subs x2 x2 1)
+  (ldrb w.byte (x.src))
+  (strb w.byte (x.dst))
+  (add x.dst x.dst 1)
+  (add x.src x.src 1)
+  (subs x.len x.len 1)
   (b.ne copy_loop)
 (: label skip_copy)
 
   ;; 追加 0x80
-  (mov x0 sp)
-  (add x0 x0 x24)           ; x0 = &buffer[remaining]
-  (mov w1 #x80)
-  (strb w1 (x0))
+  (mov x.ptr sp)
+  (add x.ptr x.ptr x.remaining)
+  (mov w.pad #x80)
+  (strb w.pad (x.ptr))
 
   ;; 判断是否需要两个块 (remaining >= 56)
-  (cmp x24 56)
+  (cmp x.remaining 56)
   (b.ge two_blocks)
 
 (: label one_block)
   ;; 一个块足够：在 offset 56 写入 total_bits (大端)
-  (mov x0 sp)
-  (add x0 x0 56)
-  (rev x1 x21)              ; 大端转换
-  (str x1 (x0))
+  (mov x.ptr sp)
+  (add x.ptr x.ptr 56)
+  (rev x.bits_be x.total_bits)
+  (str x.bits_be (x.ptr))
 
   ;; 处理这个块
-  (mov x0 x19)              ; state
-  (mov x1 sp)               ; block
+  (mov x0 x.state)
+  (mov x1 sp)
   (bl sha1_block)
   (b write_digest)
 
 (: label two_blocks)
   ;; 需要两个块
   ;; 第一个块: data + 0x80 + 零填充
-  (mov x0 x19)              ; state
-  (mov x1 sp)               ; block
+  (mov x0 x.state)
+  (mov x1 sp)
   (bl sha1_block)
 
   ;; 第二个块: 零 + total_bits
-  (mov x0 sp)
-  (add x0 x0 64)            ; 第二个块起始
-  (add x1 x0 56)            ; offset 56
-  (rev x2 x21)              ; 大端转换
-  (str x2 (x1))
+  (mov x.ptr sp)
+  (add x.ptr x.ptr 120)
+  (rev x.bits_be x.total_bits)
+  (str x.bits_be (x.ptr))
 
-  (mov x0 x19)              ; state
+  (mov x0 x.state)
   (mov x1 sp)
-  (add x1 x1 64)            ; 第二个块
+  (add x1 x1 64)
   (bl sha1_block)
+  (b write_digest)
 
 (: label write_digest)
-  ;; 输出摘要 (大端格式)
-  (ldr w0 (x19))
-  (rev w0 w0)
-  (str w0 (x22))
+  ;; 输出摘要 (大端格式) - 并行加载
+  (ldr w.h0 (x.state))
+  (ldr w.h1 (x.state 4))
+  (ldr w.h2 (x.state 8))
+  (ldr w.h3 (x.state 12))
+  (ldr w.h4 (x.state 16))
 
-  (ldr w0 (x19 4))
-  (rev w0 w0)
-  (str w0 (x22 4))
+  ;; 批量字节序转换
+  (rev w.h0 w.h0)
+  (rev w.h1 w.h1)
+  (rev w.h2 w.h2)
+  (rev w.h3 w.h3)
+  (rev w.h4 w.h4)
 
-  (ldr w0 (x19 8))
-  (rev w0 w0)
-  (str w0 (x22 8))
-
-  (ldr w0 (x19 12))
-  (rev w0 w0)
-  (str w0 (x22 12))
-
-  (ldr w0 (x19 16))
-  (rev w0 w0)
-  (str w0 (x22 16))
+  ;; 批量存储
+  (str w.h0 (x.digest))
+  (str w.h1 (x.digest 4))
+  (str w.h2 (x.digest 8))
+  (str w.h3 (x.digest 12))
+  (str w.h4 (x.digest 16))
 
   ;; 恢复栈和寄存器
   (add sp sp 128)
-  (ldp x23 x24 (sp 48))
-  (ldp x21 x22 (sp 32))
-  (ldp x19 x20 (sp 16))
-  (ldp x29 x30 (sp))
-  (add sp sp 64)
+
+  ;; (: load! all) 自动包含:
+  ;; 1. 恢复其他 callee-saved 寄存器
+  ;; 2. 恢复 x29, x30
+  ;; 3. SP 恢复
+  (: load! all)
+
   (ret)
 (: end-function)
 
@@ -242,11 +248,11 @@
 ;;   v.k0-v.k3  = K 常量
 ;;   v.e_tmp    = E 传递给 sha1c/p/m
 
-(: function sha1_block)
+(: function sha1_block (abi aapcs64))
 (: label entry)
 
-  ;; 简单的栈帧
-  (stp x29 x30 (sp -16 !))
+  ;; 使用 save! all 自动处理 prologue
+  (: save! all)
   (mov x29 sp)
 
   ;; 保存参数
@@ -291,9 +297,7 @@
 
   ;; Round 0-3
   (add v.wk.4s v.w0.4s v.k0.4s)
-  (str q.abcd (sp -16 !))
-  (ldr w.a_tmp (sp))
-  (add sp sp 16)
+  (fmov w.a_tmp s.abcd)
   (fmov s.e_tmp w.e)
   (sha1c q.abcd s.e_tmp v.wk.4s)
   (ror w.e w.a_tmp 2)
@@ -522,7 +526,7 @@
   (str q.abcd (x.state_ptr))
   (str w.e (x.state_ptr 16))
 
-  ;; 返回
-  (ldp x29 x30 (sp) 16)
+  ;; 返回 - 使用 load! all 自动处理 epilogue
+  (: load! all)
   (ret)
 (: end-function)

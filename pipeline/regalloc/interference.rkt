@@ -171,13 +171,16 @@
       (values (ordered-map-set r->i (cdr pair) idx)
               (pvector-cons-right i->r (cdr pair)))))
 
-  ;; 全局索引到类内索引的映射
+  ;; 全局索引到类内索引的映射 (使用 pvector，因为 global-idx 是连续整数)
+  ;; 构建一个足够大的 pvector，用 global-idx 直接索引
+  (define max-global-idx
+    (if (null? reg-pairs) 0 (add1 (apply max (map car reg-pairs)))))
   (define global->class
-    (for/fold ([m (make-hash)])
+    (for/fold ([v (make-vector max-global-idx #f)])
               ([pair (in-list reg-pairs)]
                [idx (in-naturals)])
-      (hash-set! m (car pair) idx)
-      m))
+      (vector-set! v (car pair) idx)
+      v))
 
   ;; 创建空图 (n 个顶点)
   (define n (length reg-pairs))
@@ -276,7 +279,8 @@
                               (define live-reg (pvector-ref index-reg live-idx))
                               (if (not (eq? (reg-id-class live-reg) class))
                                   g
-                                  (let ([live-class-idx (hash-ref global->class live-idx #f)])
+                                  (let ([live-class-idx (and (< live-idx (vector-length global->class))
+                                                            (vector-ref global->class live-idx))])
                                     (if (or (not live-class-idx)
                                             (= def-idx live-class-idx))
                                         g

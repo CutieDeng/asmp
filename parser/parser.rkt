@@ -43,6 +43,7 @@
 ;; 关键字集合
 (define shift-keywords '(lsl lsr asr ror msl))
 (define extend-keywords '(uxtb uxth uxtw uxtx sxtb sxth sxtw sxtx))
+(define cond-keywords '(eq ne cs hs cc lo mi pl vs vc hi ls ge lt gt le al nv))
 
 ;; ============================================================
 ;; 大小写控制
@@ -186,6 +187,9 @@
     ;; 符号 (可能带 @RELOC 修饰符)
     [(? symbol? sym)
      (or (try-parse-register sym)
+         ;; 条件码
+         (and (member sym cond-keywords)
+              (ast-cond sym no-srcloc))
          (parse-label-with-reloc sym no-srcloc))]))
 
 ;; 解析可能带 relocation 修饰符的标签
@@ -222,6 +226,9 @@
      (ast-imm n loc)]
     [(? symbol? sym)
      (or (try-parse-register/loc sym loc)
+         ;; 条件码
+         (and (member sym cond-keywords)
+              (ast-cond sym loc))
          ;; 检查是否看起来像寄存器但解析失败
          (begin
            (let ([str (symbol->string sym)])
@@ -284,36 +291,69 @@
     [_ (or (parse-physical-register str loc)
            (parse-virtual-register str loc))]))
 
-;; 物理寄存器: x0, z31.B, p7/m, z0*4@2.D
+;; 物理寄存器: x0, z31.B, p7/m, z0*4@2.D, v0.s@0
+;; 支持两种 @ 语法:
+;;   - z0*4@2.D : 寄存器组内索引 (*group 在 @index 前)
+;;   - v0.s@0   : SIMD lane 索引 (.element 在 @index 前)
 (define (parse-physical-register str loc)
-  (match (regexp-match #rx"^([xwzvpbhsdq])([0-9]+)(\\*([0-9]+))?(@([0-9]+))?(\\.([-a-zA-Z0-9]+))?(/([mz]))?$" str)
-    [(list _ kind-s id-s _ group-s _ index-s _ elem-s _ pred-s)
+  ;; 先尝试 .element@index 语法 (SIMD lane 访问)
+  (match (regexp-match #rx"^([xwzvpbhsdq])([0-9]+)(\\.([-a-zA-Z0-9]+))(@([0-9]+))?(/([mz]))?$" str)
+    [(list _ kind-s id-s _ elem-s _ index-s _ pred-s)
      (ast-reg (string->symbol kind-s)
               (string->number id-s)
-              (and group-s (string->number group-s))
+              #f  ; 无 group-size
               (and index-s (string->number index-s))
               (and elem-s (string->symbol elem-s))
               (and pred-s (string->symbol pred-s))
               loc)]
-    [_ #f]))
+    [_
+     ;; 再尝试 *group@index.element 语法 (寄存器组)
+     (match (regexp-match #rx"^([xwzvpbhsdq])([0-9]+)(\\*([0-9]+))?(@([0-9]+))?(\\.([-a-zA-Z0-9]+))?(/([mz]))?$" str)
+       [(list _ kind-s id-s _ group-s _ index-s _ elem-s _ pred-s)
+        (ast-reg (string->symbol kind-s)
+                 (string->number id-s)
+                 (and group-s (string->number group-s))
+                 (and index-s (string->number index-s))
+                 (and elem-s (string->symbol elem-s))
+                 (and pred-s (string->symbol pred-s))
+                 loc)]
+       [_ #f])]))
 
-;; 虚拟寄存器: x.foo, z.vec*4@2.D, v.name.4s, p.mask/z
+;; 虚拟寄存器: x.foo, z.vec*4@2.D, v.name.4s, p.mask/z, v.x.s@0
+;; 支持两种 @ 语法:
+;;   - z.vec*4@2.D : 寄存器组内索引
+;;   - v.x.s@0     : SIMD lane 索引
 ;; 元素后缀严格匹配: B, H, S, D, Q 及 NEON 排列 (8B, 4S, 16b 等，大小写均可)
 ;; GPR (x, w) 不允许元素后缀
 (define (parse-virtual-register str loc)
-  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQbhsdq]))?(/([mz]))?$" str)
-    [(list _ kind-s name-s _ group-s _ index-s _ elem-s _ pred-s)
+  ;; 先尝试 .element@index 语法 (SIMD lane 访问)
+  (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\.(1?[0-9]?[BHSDQbhsdq]))(@([0-9]+))?(/([mz]))?$" str)
+    [(list _ kind-s name-s _ elem-s _ index-s _ pred-s)
      ;; GPR (x, w) 不应该有元素后缀
-     (when (and elem-s (member kind-s '("x" "w")))
+     (when (member kind-s '("x" "w"))
        (error 'parse-register "GPR 虚拟寄存器不支持元素后缀: ~a" str))
      (ast-reg (string->symbol kind-s)
               (string->symbol name-s)
-              (and group-s (string->number group-s))
+              #f  ; 无 group-size
               (and index-s (string->number index-s))
               (and elem-s (string->symbol elem-s))
               (and pred-s (string->symbol pred-s))
               loc)]
-    [_ #f]))
+    [_
+     ;; 再尝试 *group@index.element 语法 (寄存器组)
+     (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQbhsdq]))?(/([mz]))?$" str)
+       [(list _ kind-s name-s _ group-s _ index-s _ elem-s _ pred-s)
+        ;; GPR (x, w) 不应该有元素后缀
+        (when (and elem-s (member kind-s '("x" "w")))
+          (error 'parse-register "GPR 虚拟寄存器不支持元素后缀: ~a" str))
+        (ast-reg (string->symbol kind-s)
+                 (string->symbol name-s)
+                 (and group-s (string->number group-s))
+                 (and index-s (string->number index-s))
+                 (and elem-s (string->symbol elem-s))
+                 (and pred-s (string->symbol pred-s))
+                 loc)]
+       [_ #f])]))
 
 (define (parse-register sym)
   (or (try-parse-register sym)
@@ -448,36 +488,41 @@
 (define (parse-save-load-args args stx)
   (define loc (syntax->srcloc stx))
 
-  ;; 从末尾识别 size-spec
-  (define-values (reg-args size-spec)
-    (match (reverse args)
-      ;; (: save! ... *)
-      [(cons '* rest)
-       (values (reverse rest) (list 'unlimited))]
-      ;; (: save! ... <= N)
-      [(list* n '<= rest) #:when (integer? n)
-       (values (reverse rest) (list 'at-most n))]
-      ;; (: save! ... N) - 末尾是数字，作为 exact
-      [(cons n rest) #:when (integer? n)
-       (values (reverse rest) (list 'exact n))]
-      ;; 无 size-spec，默认 unlimited
-      [_
-       (values args (list 'unlimited))]))
+  ;; 特殊情况: (: save! all) / (: load! all)
+  (if (and (= (length args) 1) (eq? (car args) 'all))
+      (values 'all (list 'auto))
+      ;; 正常情况
+      (let ()
+        ;; 从末尾识别 size-spec
+        (define-values (reg-args size-spec)
+          (match (reverse args)
+            ;; (: save! ... *)
+            [(cons '* rest)
+             (values (reverse rest) (list 'unlimited))]
+            ;; (: save! ... <= N)
+            [(list* n '<= rest) #:when (integer? n)
+             (values (reverse rest) (list 'at-most n))]
+            ;; (: save! ... N) - 末尾是数字，作为 exact
+            [(cons n rest) #:when (integer? n)
+             (values (reverse rest) (list 'exact n))]
+            ;; 无 size-spec，默认 unlimited
+            [_
+             (values args (list 'unlimited))]))
 
-  ;; 解析寄存器列表
-  (define regs
-    (for/list ([arg (in-list reg-args)])
-      (unless (symbol? arg)
-        (error 'parse-save-load "期望寄存器符号，得到: ~a" arg))
-      (define reg-result (try-parse-register/loc arg loc))
-      (unless reg-result
-        (error 'parse-save-load "无效的寄存器: ~a" arg))
-      reg-result))
+        ;; 解析寄存器列表
+        (define regs
+          (for/list ([arg (in-list reg-args)])
+            (unless (symbol? arg)
+              (error 'parse-save-load "期望寄存器符号，得到: ~a" arg))
+            (define reg-result (try-parse-register/loc arg loc))
+            (unless reg-result
+              (error 'parse-save-load "无效的寄存器: ~a" arg))
+            reg-result))
 
-  (when (null? regs)
-    (error 'parse-save-load "save!/load! 需要至少一个寄存器"))
+        (when (null? regs)
+          (error 'parse-save-load "save!/load! 需要至少一个寄存器"))
 
-  (values regs size-spec))
+        (values regs size-spec))))
 
 ;; 解析函数属性列表
 ;; 输入: ((abi aapcs64) (leaf) ...)

@@ -48,7 +48,8 @@
    select-stack-set  ;; 新增：bitset 快速查找栈中元素
    coalesce-map color-map degree move-list worklist-moves
    active-moves coalesced-moves frozen-moves constrained-moves
-   index-reg reg-index k)  ;; 改用 index-reg (pvector) 替代 reg-list
+   index-reg reg-index k
+   abi)  ;; 新增：ABI 配置
   #:transparent)
 
 ;; ============================================================
@@ -204,7 +205,8 @@
                    (ordered-map-empty reg-id-compare) initial-colors
                    degree move-list worklist-moves
                    '() '() '() '()
-                   index-reg reg-index k))
+                   index-reg reg-index k
+                   abi))
 
 ;; ============================================================
 ;; Simplify
@@ -299,19 +301,57 @@
   (define reg-index (allocator-state-reg-index state))
   (define k (allocator-state-k state))
   (define ui (ordered-map-ref reg-index u #f))
+  (define vi (ordered-map-ref reg-index v #f))
+  (define abi (allocator-state-abi state))
+
+  ;; 检查 live-across-call 与 caller-saved 的冲突
+  ;; 如果 v 是 live-across-call 的虚拟寄存器，u 是 caller-saved 物理寄存器，禁止合并
+  (define (violates-live-across-call? phys-reg virt-reg virt-idx)
+    (and virt-idx
+         (ig-live-across-call? ig virt-idx)
+         (reg-id-physical? phys-reg)
+         (not (is-callee-saved-physical? phys-reg abi))))
 
   (cond
+    ;; 如果合并会导致 live-across-call 的虚拟寄存器被分配到 caller-saved，禁止
     [(and ui (bitset-member? (allocator-state-precolored state) ui))
-     (for/and ([t (in-list (ig-neighbors ig v))])
-       (define ti (ordered-map-ref reg-index t #f))
-       (or (ig-interferes? ig t u)
-           (and ti (bitset-member? (allocator-state-precolored state) ti))
-           (< (ordered-map-ref (allocator-state-degree state) t 0) k)))]
+     (cond
+       ;; u 是预着色（物理），v 是虚拟
+       [(and vi (not (bitset-member? (allocator-state-precolored state) vi))
+             (violates-live-across-call? u v vi))
+        #f]
+       [else
+        (for/and ([t (in-list (ig-neighbors ig v))])
+          (define ti (ordered-map-ref reg-index t #f))
+          (or (ig-interferes? ig t u)
+              (and ti (bitset-member? (allocator-state-precolored state) ti))
+              (< (ordered-map-ref (allocator-state-degree state) t 0) k)))])]
+    ;; v 是预着色（物理），u 是虚拟
+    [(and vi (bitset-member? (allocator-state-precolored state) vi))
+     (cond
+       [(and ui (not (bitset-member? (allocator-state-precolored state) ui))
+             (violates-live-across-call? v u ui))
+        #f]
+       [else
+        (for/and ([t (in-list (ig-neighbors ig u))])
+          (define ti (ordered-map-ref reg-index t #f))
+          (or (ig-interferes? ig t v)
+              (and ti (bitset-member? (allocator-state-precolored state) ti))
+              (< (ordered-map-ref (allocator-state-degree state) t 0) k)))])]
     [else
      (define combined (remove-duplicates (append (ig-neighbors ig u) (ig-neighbors ig v))))
      (define high-deg (for/sum ([n (in-list combined)])
                        (if (>= (ordered-map-ref (allocator-state-degree state) n 0) k) 1 0)))
      (< high-deg k)]))
+
+;; 检查物理寄存器是否是 callee-saved (根据 ABI 配置)
+(define (is-callee-saved-physical? reg abi)
+  (and (reg-id-physical? reg)
+       (let* ([class (reg-id-class reg)]
+              [cfg (abi-get-class-config abi class)]
+              [callee-saved (and cfg (reg-callee-saved cfg))])
+         (and callee-saved
+              (bitset-member? callee-saved (reg-id-id reg))))))
 
 (define (combine state u v move)
   (define reg-index (allocator-state-reg-index state))

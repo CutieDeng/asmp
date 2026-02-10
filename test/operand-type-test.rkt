@@ -400,7 +400,7 @@
 ;; ============================================================
 
 (module+ main
-  (run-tests operand-type-tests))
+  (void (run-tests operand-type-tests)))
 
 (module+ test
-  (run-tests operand-type-tests))
+  (void (run-tests operand-type-tests)))

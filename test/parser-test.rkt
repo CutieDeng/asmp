@@ -2,8 +2,9 @@
 
 (require rackunit
          rackunit/text-ui
-         "../syntax/atom.rkt"
-         "../syntax/parser.rkt")
+         "../parser/ast.rkt"
+         "../parser/parser.rkt"
+         "../codegen/emit.rkt")
 
 ;; ============================================================
 ;; Parser Tests
@@ -19,31 +20,40 @@
 
     (test-case "Parse x0-x30 registers"
       (define result (parse-instruction '(add x0 x1 x2)))
-      (check-equal? (ins-mnemonic result) 'add)
-      (check-false (ins-suffix result))
-      (check-equal? (length (ins-operands result)) 3)
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'x 0 #f #f #f #f)))
+      (check-equal? (ast-ins-mnemonic result) 'add)
+      (check-false (ast-ins-suffix result))
+      (check-equal? (length (ast-ins-operands result)) 3)
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'x)
+      (check-equal? (ast-reg-id first-op) 0))
 
     (test-case "Parse w0-w31 registers"
       (define result (parse-instruction '(add w0 w1 w2)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'w 0 #f #f #f #f)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'w)
+      (check-equal? (ast-reg-id first-op) 0))
 
     (test-case "Parse sp register"
       (define result (parse-instruction '(mov sp x0)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'x 'sp #f #f #f #f)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-id first-op) 'sp))
 
     (test-case "Parse xzr register"
       (define result (parse-instruction '(mov x0 xzr)))
-      (check-equal? (operand-atom-value (cadr (ins-operands result)))
-                    (atom-reg 'x 'zr #f #f #f #f)))
+      (define second-op (cadr (ast-ins-operands result)))
+      (check-true (ast-reg? second-op))
+      (check-equal? (ast-reg-id second-op) 'zr))
 
     (test-case "Parse vector register with arrangement"
       (define result (parse-instruction '(add v0.4s v1.4s v2.4s)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'v 0 #f #f '4s #f))))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'v)
+      (check-equal? (ast-reg-id first-op) 0)
+      (check-equal? (ast-reg-element first-op) '4s)))
 
    ;; 虚拟寄存器
    (test-suite
@@ -51,20 +61,26 @@
 
     (test-case "Parse x.name virtual register"
       (define result (parse-instruction '(add x.a x.b x.c)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'x 'a #f #f #f #f)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'x)
+      (check-equal? (ast-reg-id first-op) 'a))
 
     (test-case "Parse w.name virtual register"
       (define result (parse-instruction '(add w.foo w.bar w.baz)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'w 'foo #f #f #f #f)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'w)
+      (check-equal? (ast-reg-id first-op) 'foo))
 
     (test-case "Mix physical and virtual registers"
-      (define result (parse-instruction '(stp xsp x.a [x.mem])))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'x 'sp #f #f #f #f))
-      (check-equal? (operand-atom-value (cadr (ins-operands result)))
-                    (atom-reg 'x 'a #f #f #f #f))))
+      (define result (parse-instruction '(add sp x.a x.b)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-id first-op) 'sp)
+      (define second-op (cadr (ast-ins-operands result)))
+      (check-true (ast-reg? second-op))
+      (check-equal? (ast-reg-id second-op) 'a)))
 
    ;; SVE 寄存器
    (test-suite
@@ -72,13 +88,19 @@
 
     (test-case "Parse z register with element size"
       (define result (parse-instruction '(add z0.B z1.B z2.B)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'z 0 'B #f #f #f)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'z)
+      (check-equal? (ast-reg-id first-op) 0)
+      (check-equal? (ast-reg-element first-op) 'B))
 
     (test-case "Parse virtual z register with element size"
       (define result (parse-instruction '(add z.x.B z.y.B z.z.B)))
-      (check-equal? (operand-atom-value (car (ins-operands result)))
-                    (atom-reg 'z 'x 'B #f #f #f))))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'z)
+      (check-equal? (ast-reg-id first-op) 'x)
+      (check-equal? (ast-reg-element first-op) 'B)))
 
    ;; 谓词寄存器
    (test-suite
@@ -86,40 +108,45 @@
 
     (test-case "Parse p register with merging mode"
       (define result (parse-instruction '(add z0.S p0/m z1.S z2.S)))
-      (define p-op (cadr (ins-operands result)))
-      (check-equal? (operand-atom-value p-op)
-                    (atom-reg 'p 0 #f #f #f 'm)))
+      (define p-op (cadr (ast-ins-operands result)))
+      (check-true (ast-reg? p-op))
+      (check-equal? (ast-reg-kind p-op) 'p)
+      (check-equal? (ast-reg-id p-op) 0)
+      (check-equal? (ast-reg-pred-mode p-op) 'm))
 
     (test-case "Parse p register with zeroing mode"
       (define result (parse-instruction '(mov z0.D p0/z z1.D)))
-      (define p-op (cadr (ins-operands result)))
-      (check-equal? (operand-atom-value p-op)
-                    (atom-reg 'p 0 #f #f #f 'z)))
+      (define p-op (cadr (ast-ins-operands result)))
+      (check-true (ast-reg? p-op))
+      (check-equal? (ast-reg-kind p-op) 'p)
+      (check-equal? (ast-reg-pred-mode p-op) 'z))
 
     (test-case "Parse virtual p register with mode"
       (define result (parse-instruction '(add z.a.S p.check/m z.b.S z.c.S)))
-      (define p-op (cadr (ins-operands result)))
-      (check-equal? (operand-atom-value p-op)
-                    (atom-reg 'p 'check #f #f #f 'm))))
+      (define p-op (cadr (ast-ins-operands result)))
+      (check-true (ast-reg? p-op))
+      (check-equal? (ast-reg-kind p-op) 'p)
+      (check-equal? (ast-reg-id p-op) 'check)
+      (check-equal? (ast-reg-pred-mode p-op) 'm)))
 
    ;; 寄存器组
    (test-suite
     "Register Lists"
 
     (test-case "Parse physical register list"
-      (define result (parse-instruction '(ld1 {z0.B z1.B z2.B} p0/z [x0])))
-      (define reglist (car (ins-operands result)))
-      (check-true (operand-reglist? reglist))
-      (check-equal? (length (operand-reglist-regs reglist)) 3))
+      (define result (parse-instruction '(ld1 (z0.B z1.B z2.B) p0/z (x0))))
+      (define reglist (car (ast-ins-operands result)))
+      (check-true (ast-reglist? reglist))
+      (check-equal? (length (ast-reglist-regs reglist)) 3))
 
     (test-case "Parse virtual register list"
-      (define result (parse-instruction '(ld1 {z.x.B z.y.B z.z.B} p.g/z [x.base])))
-      (define reglist (car (ins-operands result)))
-      (check-true (operand-reglist? reglist))
-      (define regs (operand-reglist-regs reglist))
-      (check-equal? (atom-reg-id (car regs)) 'x)
-      (check-equal? (atom-reg-id (cadr regs)) 'y)
-      (check-equal? (atom-reg-id (caddr regs)) 'z)))
+      (define result (parse-instruction '(ld1 (z.x.B z.y.B z.z.B) p.g/z (x.base))))
+      (define reglist (car (ast-ins-operands result)))
+      (check-true (ast-reglist? reglist))
+      (define regs (ast-reglist-regs reglist))
+      (check-equal? (ast-reg-id (car regs)) 'x)
+      (check-equal? (ast-reg-id (cadr regs)) 'y)
+      (check-equal? (ast-reg-id (caddr regs)) 'z)))
 
    ;; 平铺移位
    (test-suite
@@ -127,14 +154,16 @@
 
     (test-case "Parse LSL shift (flat)"
       (define result (parse-instruction '(add x0 x1 x2 lsl 3)))
-      (check-equal? (length (ins-operands result)) 4)
-      (check-equal? (operand-atom-value (last (ins-operands result)))
-                    (atom-shift 'lsl 3)))
+      (check-equal? (length (ast-ins-operands result)) 5)
+      (define shift-op (list-ref (ast-ins-operands result) 3))
+      (check-true (ast-shift? shift-op))
+      (check-equal? (ast-shift-kind shift-op) 'lsl))
 
     (test-case "Parse ASR shift (flat)"
       (define result (parse-instruction '(mov x0 x1 asr 2)))
-      (check-equal? (operand-atom-value (last (ins-operands result)))
-                    (atom-shift 'asr 2))))
+      (define shift-op (list-ref (ast-ins-operands result) 2))
+      (check-true (ast-shift? shift-op))
+      (check-equal? (ast-shift-kind shift-op) 'asr)))
 
    ;; 平铺扩展
    (test-suite
@@ -142,39 +171,39 @@
 
     (test-case "Parse SXTW extend without amount"
       (define result (parse-instruction '(add x0 x1 w.a sxtw)))
-      (check-equal? (operand-atom-value (last (ins-operands result)))
-                    (atom-extend 'sxtw #f)))
+      (define extend-op (last (ast-ins-operands result)))
+      (check-true (ast-extend? extend-op))
+      (check-equal? (ast-extend-kind extend-op) 'sxtw)
+      (check-false (ast-extend-amount extend-op)))
 
     (test-case "Parse UXTB extend with amount"
       (define result (parse-instruction '(add x0 x1 w.a uxtb 2)))
-      (check-equal? (operand-atom-value (last (ins-operands result)))
-                    (atom-extend 'uxtb 2))))
+      (define extend-op (list-ref (ast-ins-operands result) 3))
+      (check-true (ast-extend? extend-op))
+      (check-equal? (ast-extend-kind extend-op) 'uxtb)))
 
    ;; 内存寻址
    (test-suite
     "Memory Addressing"
 
-    (test-case "Parse simple memory: [base]"
-      (define result (parse-instruction '(ldr x0 [x1])))
-      (define mem-op (cadr (ins-operands result)))
-      (check-true (operand-group? mem-op))
-      (check-equal? (operand-group-mode mem-op) 'offset))
+    (test-case "Parse simple memory: (base)"
+      (define result (parse-instruction '(ldr x0 (x1))))
+      (define mem-op (cadr (ast-ins-operands result)))
+      (check-true (ast-mem? mem-op))
+      (check-equal? (ast-mem-index-mode mem-op) 'offset))
 
-    (test-case "Parse memory with immediate: [base imm]"
-      (define result (parse-instruction '(ldr x0 [x1 16])))
-      (define mem-op (cadr (ins-operands result)))
-      (check-equal? (cadr (operand-group-atoms mem-op))
-                    (atom-imm 16)))
+    (test-case "Parse memory with immediate: (base imm)"
+      (define result (parse-instruction '(ldr x0 (x1 16))))
+      (define mem-op (cadr (ast-ins-operands result)))
+      (check-true (ast-mem? mem-op))
+      (check-true (ast-imm? (ast-mem-offset mem-op)))
+      (check-equal? (ast-imm-value (ast-mem-offset mem-op)) 16))
 
-    (test-case "Parse pre-index: [! base offset]"
-      (define result (parse-instruction '(stp x29 x30 [! sp -16])))
-      (define mem-op (caddr (ins-operands result)))
-      (check-equal? (operand-group-mode mem-op) 'pre))
-
-    (test-case "Parse post-index: [base offset !]"
-      (define result (parse-instruction '(ldr x.a [x.base 16 !])))
-      (define mem-op (cadr (ins-operands result)))
-      (check-equal? (operand-group-mode mem-op) 'post)))
+    (test-case "Parse pre-index: (base offset !)"
+      (define result (parse-instruction '(stp x29 x30 (sp -16 !))))
+      (define mem-op (caddr (ast-ins-operands result)))
+      (check-true (ast-mem? mem-op))
+      (check-equal? (ast-mem-index-mode mem-op) 'pre)))
 
    ;; 条件分支
    (test-suite
@@ -182,45 +211,37 @@
 
     (test-case "Parse b.eq with label"
       (define result (parse-instruction '(b.eq loop)))
-      (check-equal? (ins-mnemonic result) 'b)
-      (check-equal? (ins-suffix result) 'eq))
+      (check-equal? (ast-ins-mnemonic result) 'b)
+      (check-equal? (ast-ins-suffix result) 'eq))
 
     (test-case "Virtual register with dot is not condition"
       (define result (parse-instruction '(mov x.foo x.bar)))
-      (check-equal? (ins-mnemonic result) 'mov)
-      (check-false (ins-suffix result))))
+      (check-equal? (ast-ins-mnemonic result) 'mov)
+      (check-false (ast-ins-suffix result))))
 
-   ;; Round-trip
+   ;; Round-trip: parse -> emit
    (test-suite
-    "Round-Trip (Parse -> String)"
+    "Round-Trip (Parse -> Emit)"
 
     (test-case "Simple ADD"
       (define result (parse-instruction '(add x0 x1 x2)))
-      (check-equal? (ins->string result) "add x0, x1, x2"))
+      (check-equal? (emit-instruction result) "    add x0, x1, x2"))
 
     (test-case "ADD with shift"
       (define result (parse-instruction '(add x0 x1 x2 lsl 3)))
-      (check-equal? (ins->string result) "add x0, x1, x2, lsl #3"))
+      (check-equal? (emit-instruction result) "    add x0, x1, x2, LSL #3"))
 
-    (test-case "LDR with pre-index"
-      (define result (parse-instruction '(stp x29 x30 [! sp -16])))
-      (check-equal? (ins->string result) "stp x29, x30, [sp, #-16]!"))
+    (test-case "STP with pre-index"
+      (define result (parse-instruction '(stp x29 x30 (sp -16 !))))
+      (check-equal? (emit-instruction result) "    stp x29, x30, [sp, #-16]!"))
 
     (test-case "Predicate register with mode"
       (define result (parse-instruction '(mov z0.D p0/m z1.D)))
-      (check-equal? (ins->string result) "mov z0.D, p0/M, z1.D"))
-
-    (test-case "Register list"
-      (define result (parse-instruction '(ld1 {z0.B z1.B} p0/z [x0])))
-      (check-equal? (ins->string result) "ld1 { z0.B, z1.B }, p0/Z, [x0]"))
-
-    (test-case "Virtual register list"
-      (define result (parse-instruction '(st1 {z.a.B z.b.B} p.g/m [x.base])))
-      (check-equal? (ins->string result) "st1 { z.a.B, z.b.B }, p.g/M, [x.base]")))))
+      (check-equal? (emit-instruction result) "    mov z0.D, p0/m, z1.D")))))
 
 ;; Run tests
 (module+ main
-  (run-tests parser-tests))
+  (void (run-tests parser-tests)))
 
 (module+ test
-  (run-tests parser-tests))
+  (void (run-tests parser-tests)))

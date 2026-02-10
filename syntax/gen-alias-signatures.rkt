@@ -142,7 +142,10 @@
              (set! operands (cons 'immediate operands))]
             ;; Shift/extend (非可选的)
             [(regexp-match? #rx"shift" rule-id)
-             (set! operands (cons 'keyword operands))])))))
+             (set! operands (cons 'keyword operands))]
+            ;; Condition code
+            [(regexp-match? #rx"^cond" rule-id)
+             (set! operands (cons 'cond-code operands))])))))
 
   (reverse operands))
 
@@ -411,6 +414,14 @@
           (define datum (read))
           (unless (eof-object? datum)
             (match datum
+              ;; 5 元素格式: (enc-id mnem template constraints operand-fields)
+              [(list enc-id mnem template constraints operand-fields)
+               (hash-set! result enc-id
+                          (hash 'mnem mnem
+                                'template template
+                                'constraints constraints
+                                'operand-fields operand-fields))]
+              ;; 4 元素格式 (旧格式兼容)
               [(list enc-id mnem template constraints)
                (hash-set! result enc-id
                           (hash 'mnem mnem
@@ -448,6 +459,8 @@
     ;; 移位/扩展
     [(regexp-match? #rx"shift" elem) 'shift]
     [(regexp-match? #rx"extend" elem) 'extend]
+    ;; 条件码
+    [(regexp-match? #rx"^cond" elem) 'cond-code]
     ;; 元素大小后缀
     [(regexp-match? #rx"^\\.([BHSDQ])$" elem) 'element-suffix]
     ;; 其他
@@ -477,6 +490,9 @@
         ;; Shift/extend keyword
         [(regexp-match? #rx"(lsl|lsr|asr|ror|sxt|uxt)" (string-downcase p-trimmed))
          'keyword]
+        ;; Condition code
+        [(regexp-match? #rx"^(EQ|NE|CS|HS|CC|LO|MI|PL|VS|VC|HI|LS|GE|LT|GT|LE|AL|NV)" p-trimmed)
+         'cond-code]
         [else 'unknown])))
   (filter (lambda (t) (not (eq? t 'unknown))) types))
 

@@ -25,6 +25,9 @@
   default-spill-config
   no-spill-config
 
+  ;; save!/load! 验证级别
+  save-load-verify-level
+
   ;; 查询
   spill-allowed?
   spill-region-allows?)
@@ -125,3 +128,15 @@
 (define (spill-region-allows? region count)
   (and region
        (<= count (count-spec-max (spill-region-save-spec region)))))
+
+;; ============================================================
+;; save!/load! 验证参数
+;; ============================================================
+;;
+;; 控制 (: save! all) / (: load! all) 配对验证：
+;;   'suppress  - 不检查，不输出信息
+;;   'expected  - 不检查，但输出调试信息
+;;   'warning   - 检查，未配对时输出警告（默认）
+;;   'error     - 检查，未配对时报错
+
+(define save-load-verify-level (make-parameter 'warning))

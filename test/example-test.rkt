@@ -66,8 +66,9 @@
 ;; 发现 example 文件
 ;; ============================================================
 
-(define example-dir
-  (build-path (current-directory) "example"))
+;; 获取当前文件所在目录，再定位到 ../example
+(define here (path-only (syntax-source #'here)))
+(define example-dir (simplify-path (build-path here ".." "example")))
 
 (define (find-example-files)
   (if (directory-exists? example-dir)
@@ -101,7 +102,7 @@
 ;; ============================================================
 
 (module+ test
-  (run-tests example-tests))
+  (void (run-tests example-tests)))
 
 (module+ main
   (define verbosity (make-parameter 'normal))
@@ -113,4 +114,4 @@
    #:args ()
 
    (printf "发现 ~a 个 example 文件\n\n" (length (find-example-files)))
-   (run-tests example-tests (verbosity))))
+   (void (run-tests example-tests (verbosity)))))

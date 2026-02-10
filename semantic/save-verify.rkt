@@ -252,11 +252,21 @@
             (cond
               [(hash-ref save-at key #f)
                => (lambda (sp)
-                    (define keys (map reg-key (save-point-registers sp)))
+                    ;; 处理 'all 特殊情况
+                    (define regs (save-point-registers sp))
+                    (define keys (if (eq? regs 'all)
+                                     ;; 使用特殊键格式: (all . all)
+                                     (list (cons 'all 'all))
+                                     (map reg-key regs)))
                     (values (depth-state-inc state keys) errors))]
               [(hash-ref load-at key #f)
                => (lambda (lp)
-                    (define keys (map reg-key (load-point-registers lp)))
+                    ;; 处理 'all 特殊情况
+                    (define regs (load-point-registers lp))
+                    (define keys (if (eq? regs 'all)
+                                     ;; 使用特殊键格式: (all . all)
+                                     (list (cons 'all 'all))
+                                     (map reg-key regs)))
                     (define-values (new-state dec-errors)
                       (depth-state-dec state keys))
                     (values new-state (append dec-errors errors)))]

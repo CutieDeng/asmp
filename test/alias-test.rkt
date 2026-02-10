@@ -286,7 +286,7 @@
 ;; ============================================================
 
 (module+ main
-  (run-tests alias-tests))
+  (void (run-tests alias-tests)))
 
 (module+ test
-  (run-tests alias-tests))
+  (void (run-tests alias-tests)))

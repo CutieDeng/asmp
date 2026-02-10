@@ -16,7 +16,7 @@
 ;; 基本虚拟寄存器使用
 ;; 分配器会选择合适的物理寄存器
 ;; ------------------------------------------------------------
-(: function basic_virtual (export))
+(: function basic_virtual (export) (abi arm64))
 (: label entry)
   ;; 使用虚拟寄存器, 让分配器决定物理寄存器
   (mov x.a 1)               ; x.a = 1
@@ -30,7 +30,7 @@
 ;; 复杂活跃区间示例
 ;; 演示寄存器分配器处理交叉活跃区间
 ;; ------------------------------------------------------------
-(: function complex_liveness (export))
+(: function complex_liveness (export) (abi arm64))
 (: label entry)
   ;; 多个变量有重叠的活跃区间
   (mov x.a 1)
@@ -52,7 +52,7 @@
 ;; ------------------------------------------------------------
 ;; 循环中的虚拟寄存器
 ;; ------------------------------------------------------------
-(: function loop_with_virtual (export))
+(: function loop_with_virtual (export) (abi arm64))
 (: label entry)
   ;; sum(n) = 1 + 2 + ... + n
   (mov x.n x0)              ; 保存参数
@@ -72,7 +72,7 @@
 ;; ------------------------------------------------------------
 ;; 32 位虚拟寄存器
 ;; ------------------------------------------------------------
-(: function virtual_32bit (export))
+(: function virtual_32bit (export) (abi arm64))
 (: label entry)
   (mov w.a w0)              ; 32 位虚拟寄存器
   (mov w.b w1)
@@ -85,7 +85,7 @@
 ;; 混合物理和虚拟寄存器
 ;; 物理寄存器约束分配器的选择
 ;; ------------------------------------------------------------
-(: function mixed_registers (export))
+(: function mixed_registers (export) (abi arm64))
 (: label entry)
   ;; x0, x1 是物理寄存器 (参数)
   ;; x.temp 是虚拟寄存器
@@ -99,7 +99,7 @@
 ;; ------------------------------------------------------------
 ;; 高寄存器压力 (可能需要溢出)
 ;; ------------------------------------------------------------
-(: function high_pressure (export))
+(: function high_pressure (export) (abi arm64))
 (: label entry)
   ;; 同时需要很多活跃变量
   (mov x.v0 1)

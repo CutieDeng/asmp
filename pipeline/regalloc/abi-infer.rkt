@@ -75,39 +75,49 @@
 ;; ============================================================
 
 ;; 收集函数自身指令的 def（不包括调用传递的 def）
+;; fn : asm-function
+;; → (values inferred-abi (listof symbol))
+;;   第一个返回值: 函数局部 def 的寄存器集合
+;;   第二个返回值: 调用目标函数名列表 (去重)
 (define (collect-local-defs fn)
-  (define gpr-def bitset-empty)
-  (define fpr-def bitset-empty)
-  (define pred-def bitset-empty)
-  (define callees '())
+  ;; gd : bitset — 被 def 的 GPR 编号
+  ;; fd : bitset — 被 def 的 FPR 编号
+  ;; pd : bitset — 被 def 的 Predicate 编号
+  ;; cs : (listof symbol) — 调用目标 (逆序，有重复)
+  (define-values (gd fd pd cs)
+    (for*/fold ([gd bitset-empty]
+                [fd bitset-empty]
+                [pd bitset-empty]
+                [cs '()])
+               ([kv (in-ordered-map (asm-function-blocks fn))]
+                [ins (in-pvector (basic-block-instructions (cdr kv)))]
+                #:when (ast-ins? ins))
+      (define mnem (ast-ins-mnemonic ins))
+      (cond
+        ;; bl/blr 调用：收集被调用函数名
+        [(memq mnem '(bl blr))
+         (define target (get-call-target ins))
+         (if (and target (symbol? target))
+             (values gd fd pd (cons target cs))
+             (values gd fd pd cs))]
+        ;; 其他指令：收集 def 的物理寄存器
+        [else
+         (define use-def (extract-use-def ins))
+         (define-values (gd2 fd2 pd2)
+           (for/fold ([g gd] [f fd] [p pd])
+                     ([ref (in-list (use-def-flat-defs use-def))])
+             (define-values (class reg-num) (physical-reg-info ref))
+             (if reg-num
+                 (case class
+                   [(gpr) (values (bitset-add g reg-num) f p)]
+                   [(fpr) (values g (bitset-add f reg-num) p)]
+                   [(predicate) (values g f (bitset-add p reg-num))]
+                   [else (values g f p)])
+                 (values g f p))))
+         (values gd2 fd2 pd2 cs)])))
 
-  (fn-for-each-block fn
-    (lambda (block)
-      (for ([ins (in-pvector (basic-block-instructions block))])
-        (cond
-          ;; 普通指令：收集 def
-          [(ast-ins? ins)
-           (define mnem (ast-ins-mnemonic ins))
-           (cond
-             ;; bl/blr 调用：收集被调用函数名
-             [(memq mnem '(bl blr))
-              (define target (get-call-target ins))
-              (when (and target (symbol? target))
-                (set! callees (cons target callees)))]
-             ;; 其他指令：收集 def 的物理寄存器
-             [else
-              (define use-def (extract-use-def ins))
-              (for ([ref (in-list (use-def-flat-defs use-def))])
-                (define-values (class reg-num) (physical-reg-info ref))
-                (when reg-num
-                  (case class
-                    [(gpr) (set! gpr-def (bitset-add gpr-def reg-num))]
-                    [(fpr) (set! fpr-def (bitset-add fpr-def reg-num))]
-                    [(predicate) (set! pred-def (bitset-add pred-def reg-num))])))])]
-          [else (void)]))))
-
-  (values (inferred-abi gpr-def fpr-def pred-def)
-          (remove-duplicates callees)))
+  (values (inferred-abi gd fd pd)
+          (remove-duplicates cs)))
 
 ;; 获取调用目标（bl 的标签名）
 (define (get-call-target ins)
@@ -139,15 +149,15 @@
 ;; ============================================================
 
 ;; 构建调用图
-;; 返回 hash[fn-name -> (listof callee-name)]
+;; cfg            : cfg (程序 CFG)
+;; local-info-map : hash[fn-name → (cons inferred-abi (listof symbol))]
+;; → hash[fn-name → (listof callee-name)]
 (define (build-call-graph cfg local-info-map)
-  (define graph (make-hash))
-  (for ([i (in-range (cfg-function-count cfg))])
+  (for/hash ([i (in-range (cfg-function-count cfg))])
     (define fn (cfg-get-function cfg i))
     (define fn-name (asm-function-name fn))
     (define info (hash-ref local-info-map fn-name #f))
-    (hash-set! graph fn-name (if info (cdr info) '())))
-  graph)
+    (values fn-name (if info (cdr info) '()))))
 
 ;; Tarjan 算法找 SCC
 (define (find-sccs graph)
@@ -273,27 +283,29 @@
 ;; ============================================================
 
 ;; 验证函数是否遵守声明的 ABI
-;; 返回错误列表
+;; fn-name      : symbol
+;; declared-abi : abi-config
+;; inferred     : inferred-abi
+;; → (listof string) — 错误信息列表
 (define (verify-declared-abi fn-name declared-abi inferred)
-  (define errors '())
-
   (define (check-class class-name cfg inferred-def)
+    ;; preserved : bitset — ABI 要求保护的寄存器
     (define preserved (reg-class-config-preserved cfg))
+    ;; violations : bitset — 被修改的保护寄存器
     (define violations (bitset-intersection preserved inferred-def))
-    (unless (bitset-empty? violations)
-      (define reg-names
-        (for/list ([r (in-bitset violations)])
-          (format-reg-name class-name r)))
-      (set! errors
-            (cons (format "函数 '~a' 声明的 ABI 要求保护 ~a，但函数修改了它们"
-                          fn-name (string-join reg-names ", "))
-                  errors))))
+    (if (bitset-empty? violations)
+        '()
+        (let ()
+          (define reg-names
+            (for/list ([r (in-bitset violations)])
+              (format-reg-name class-name r)))
+          (list (format "函数 '~a' 声明的 ABI 要求保护 ~a，但函数修改了它们"
+                        fn-name (string-join reg-names ", "))))))
 
-  (check-class 'gpr (abi-config-gpr declared-abi) (inferred-abi-gpr-def inferred))
-  (check-class 'fpr (abi-config-fpr declared-abi) (inferred-abi-fpr-def inferred))
-  (check-class 'pred (abi-config-pred declared-abi) (inferred-abi-pred-def inferred))
-
-  errors)
+  (append
+   (check-class 'gpr (abi-config-gpr declared-abi) (inferred-abi-gpr-def inferred))
+   (check-class 'fpr (abi-config-fpr declared-abi) (inferred-abi-fpr-def inferred))
+   (check-class 'pred (abi-config-pred declared-abi) (inferred-abi-pred-def inferred))))
 
 ;; 格式化寄存器名
 (define (format-reg-name class reg-num)
@@ -308,37 +320,46 @@
 ;; ============================================================
 
 ;; 对 CFG 中的所有函数进行 ABI 推断和验证
-;; 返回 hash[fn-name -> function-abi-info]
+;; cfg : cfg (程序 CFG)
+;; → hash[fn-name → function-abi-info]
 (define (infer-all-abis cfg)
   ;; 1. 收集每个函数的局部 def 和调用关系
-  (define local-info-map (make-hash))  ; fn-name -> (cons inferred-abi callees)
-  (define declared-abis (make-hash))    ; fn-name -> abi-config
+  ;; local-info-map : hash[fn-name → (cons inferred-abi (listof symbol))]
+  ;; declared-abis  : hash[fn-name → abi-config]
+  (define-values (local-info-map declared-abis)
+    (for/fold ([info-map (hash)]
+               [abis (hash)])
+              ([i (in-range (cfg-function-count cfg))])
+      (define fn (cfg-get-function cfg i))
+      (define fn-name (asm-function-name fn))
+      (define-values (local-def callees) (collect-local-defs fn))
+      (define new-info-map (hash-set info-map fn-name (cons local-def callees)))
 
-  (for ([i (in-range (cfg-function-count cfg))])
-    (define fn (cfg-get-function cfg i))
-    (define fn-name (asm-function-name fn))
-    (define-values (local-def callees) (collect-local-defs fn))
-    (hash-set! local-info-map fn-name (cons local-def callees))
+      ;; 检查是否有声明的 ABI
+      (define abi-name (fn-get-info fn 'abi #f))
+      (define new-abis
+        (if abi-name
+            (let ([abi (get-abi-by-name abi-name)])
+              (if abi (hash-set abis fn-name abi) abis))
+            abis))
 
-    ;; 检查是否有声明的 ABI
-    (define abi-name (fn-get-info fn 'abi #f))
-    (when abi-name
-      (define abi (get-abi-by-name abi-name))
-      (when abi
-        (hash-set! declared-abis fn-name abi))))
+      (values new-info-map new-abis)))
 
   ;; 2. 构建调用图并找 SCC
   (define call-graph (build-call-graph cfg local-info-map))
   (define sccs (find-sccs call-graph))
 
   ;; 3. 按拓扑序（逆序 SCC）计算不动点
-  (define result-map (make-hash))  ; fn-name -> inferred-abi
+  ;; result-map : mutable hash[fn-name → inferred-abi]
+  ;; 注意：Tarjan SCC 和不动点迭代使用 mutable hash，
+  ;;       因为算法本身依赖于迭代中对共享状态的更新
+  (define result-map (make-hash))
   (for ([scc (in-list sccs)])
     (compute-scc-fixpoint scc local-info-map result-map declared-abis))
 
   ;; 4. 验证声明的 ABI 并构建最终结果
-  (define final-result (make-hash))
-  (for ([i (in-range (cfg-function-count cfg))])
+  ;; final-result : hash[fn-name → function-abi-info]
+  (for/hash ([i (in-range (cfg-function-count cfg))])
     (define fn (cfg-get-function cfg i))
     (define fn-name (asm-function-name fn))
     (define inferred (hash-ref result-map fn-name inferred-abi-empty))
@@ -350,10 +371,8 @@
           (verify-declared-abi fn-name declared inferred)
           '()))
 
-    (hash-set! final-result fn-name
-               (function-abi-info fn-name declared inferred callees errors)))
-
-  final-result)
+    (values fn-name
+            (function-abi-info fn-name declared inferred callees errors))))
 
 ;; 查询函数的 ABI 信息
 (define (get-function-abi-info abi-info-map fn-name)

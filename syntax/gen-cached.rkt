@@ -399,9 +399,9 @@
           (load-custom-aliases custom-alias-path))
         (values '() '())))
 
-  ;; 合并别名
-  (define alias-sigs (append alias-sigs-base custom-sigs))
-  (define alias-transforms (append alias-transforms-base custom-transforms))
+  ;; 合并别名 (自定义优先)
+  (define alias-sigs (append custom-sigs alias-sigs-base))
+  (define alias-transforms (append custom-transforms alias-transforms-base))
 
   (when (pair? alias-sigs)
     (printf "已加载 ~a 个别名定义\n\n" (length alias-sigs)))
