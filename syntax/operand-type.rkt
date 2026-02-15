@@ -14,6 +14,7 @@
   ;; AST 操作数分类
   classify-ast-operand
   classify-ast-operand/detailed  ; 详细版本，包含谓词限定符
+  label-looks-like-system-reg?
 
   ;; 签名匹配
   signature-matches?
@@ -255,6 +256,38 @@
 ;; AST 操作数分类
 ;; ============================================================
 
+;; 判断标签名是否看起来像系统寄存器
+;; 这里覆盖两类：
+;; 1) 常见命名系统寄存器（如 CurrentEL/DAIF/SP_EL0/TPIDR_EL0/CNTVCT_EL0）
+;; 2) 编码式系统寄存器（如 S3_3_C14_C0_2）
+(define common-system-reg-names
+  '("CurrentEL" "DAIF" "NZCV" "FPCR" "FPSR"
+    "UAO" "PAN" "DIT" "SSBS" "TCO"
+    "SVCRSM" "SVCRZA" "SVCRSMZA"))
+
+;; 具名系统寄存器模式名（MRS 文档风格），例如:
+;;   DBGBVR<m>_EL1, ICC_PPI_ENABLER<n>_EL1, S3_<op1>_C<Cn>_C<Cm>_<op2>
+(define (system-reg-pattern-name? str)
+  (regexp-match? #rx"^[A-Za-z0-9_]*(<[A-Za-z0-9_]+>[A-Za-z0-9_]*)+$" str))
+
+(define (label-looks-like-system-reg? name)
+  (define str
+    (cond
+      [(symbol? name) (symbol->string name)]
+      [(string? name) name]
+      [else (format "~a" name)]))
+  (or
+   (member str common-system-reg-names)
+   (system-reg-pattern-name? str)
+   ;; 编码式写法
+   (regexp-match? #rx"^S[0-3]_[0-7]_C[0-9]+_C[0-9]+_[0-7]$" str)
+   ;; 常见 *_ELn 形式
+   (regexp-match?
+    #rx"^(SP|ELR|SPSR|TPIDR|TPIDRRO|CNTVCT|CNTFRQ|PMCCNTR|PMCR|PMUSERENR|ACTLR|CPACR|SCTLR|MAIR|TCR|TTBR0|TTBR1|VBAR|FAR|ESR|AFSR0|AFSR1|AMAIR|MIDR|MPIDR|REVIDR|CTR|DCZID|CLIDR|CCSIDR|CSSELR)_EL[0-3]$"
+    str)
+   ;; ID 寄存器族
+   (regexp-match? #rx"^ID_AA64[A-Z0-9_]+_EL[0-3]$" str)))
+
 ;; 分类 AST 操作数节点
 (define (classify-ast-operand op)
   (match op
@@ -276,8 +309,11 @@
     [(ast-imm value _)
      (if (< value 0) 'negimm 'immediate)]
 
-    ;; 标签
-    [(ast-label _ _ _) 'label]
+    ;; 标签（用于 mrs/msr 等场景时，具名系统寄存器也走 ast-label）
+    [(ast-label name reloc _)
+     (if (and (not reloc) (label-looks-like-system-reg? name))
+         'system-reg
+         'label)]
 
     ;; 移位
     [(ast-shift _ _ _) 'keyword]
@@ -456,4 +492,3 @@
     ;; 限定符类型不匹配
     [else
      (format "谓词限定符错误: 期望 /~a，实际 /~a" expected actual-norm)]))
-

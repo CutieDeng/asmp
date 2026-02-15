@@ -15,6 +15,7 @@
 ;;   - 所有 bb-id 统一封装为 (bb-id val) 类型
 
 (require "../parser/ast.rkt"
+         "../syntax/operand-type.rkt"
          "branch-info.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
@@ -380,8 +381,8 @@
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]
-        ;; 保留 save!/load!/weak-mov 指令在指令流中
-        [(ast-directive (or 'save! 'load! 'weak-mov) _ _ _)
+        ;; 保留 save!/load!/weak-mov/inline 指令在指令流中
+        [(ast-directive (or 'save! 'load! 'weak-mov 'inline) _ _ _)
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]
@@ -767,7 +768,9 @@
   (match ins
     [(ast-ins _ _ operands _)
      (for/list ([op (in-list operands)]
-                #:when (ast-label? op))
+                #:when (and (ast-label? op)
+                            (not (and (not (ast-label-reloc op))
+                                      (label-looks-like-system-reg? (ast-label-name op))))))
        (ast-label-name op))]
     [_ '()]))
 

@@ -53,7 +53,23 @@
       (check-true (ast-reg? first-op))
       (check-equal? (ast-reg-kind first-op) 'v)
       (check-equal? (ast-reg-id first-op) 0)
-      (check-equal? (ast-reg-element first-op) '4s)))
+      (check-equal? (ast-reg-element first-op) '4s))
+
+    (test-case "Parse q register with arrangement suffix (deferred validation)"
+      (define result (parse-instruction '(movi q0.16b 1)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'q)
+      (check-equal? (ast-reg-id first-op) 0)
+      (check-equal? (ast-reg-element first-op) '16b))
+
+    (test-case "Parse x register with arrangement suffix (deferred validation)"
+      (define result (parse-instruction '(add x0.8b x1 x2)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'x)
+      (check-equal? (ast-reg-id first-op) 0)
+      (check-equal? (ast-reg-element first-op) '8b)))
 
    ;; 虚拟寄存器
    (test-suite
@@ -80,7 +96,23 @@
       (check-equal? (ast-reg-id first-op) 'sp)
       (define second-op (cadr (ast-ins-operands result)))
       (check-true (ast-reg? second-op))
-      (check-equal? (ast-reg-id second-op) 'a)))
+      (check-equal? (ast-reg-id second-op) 'a))
+
+    (test-case "Parse virtual q register with arrangement suffix (deferred validation)"
+      (define result (parse-instruction '(movi q.a.16b 1)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'q)
+      (check-equal? (ast-reg-id first-op) 'a)
+      (check-equal? (ast-reg-element first-op) '16b))
+
+    (test-case "Parse virtual x register with arrangement suffix (deferred validation)"
+      (define result (parse-instruction '(add x.a.8b x1 x2)))
+      (define first-op (car (ast-ins-operands result)))
+      (check-true (ast-reg? first-op))
+      (check-equal? (ast-reg-kind first-op) 'x)
+      (check-equal? (ast-reg-id first-op) 'a)
+      (check-equal? (ast-reg-element first-op) '8b)))
 
    ;; SVE 寄存器
    (test-suite

@@ -11,6 +11,7 @@
          "../../parser/frontend.rkt"
          "../../parser/ast.rkt"
          "../../semantic/control-flow.rkt"
+         "../../semantic/inline.rkt"
          "../../pipeline/pipeline.rkt"
          "../../pipeline/regalloc/abi-config.rkt"
          "../../codegen/emit.rkt")
@@ -34,7 +35,7 @@
     (for/list ([r (parse-results-items results)]
                #:when (parse-result-ok? r))
       (parse-result-instruction r)))
-  (define cfg (build-cfg items))
+  (define cfg (expand-inline-cfg (build-cfg items)))
 
   (parameterize ([current-emit-config apple-emit-config])
     (string-join
@@ -70,8 +71,13 @@
    ;; ----------------------------------------------------------
    (test-case "001 基本 GPR save!/load!"
      (define asm (compile-test-file "001-basic-gpr.d"))
-     ;; 应该有栈分配
-     (check-true (asm-contains? asm "sub sp, sp") "缺少 sub sp, sp")
+     ;; 应该有栈分配 (旧路径 sub sp 或优化路径 pre-index stp)
+     (define has-sub? (asm-contains? asm "sub sp, sp, #[0-9]+"))
+     (define has-preindex? (asm-contains? asm "stp x29, x30, \\[sp, #-[0-9]+\\]!"))
+     (check-true (or has-sub? has-preindex?) "缺少栈分配指令")
+     ;; 若已经使用 pre-index，不应再有冗余 sub sp
+     (when has-preindex?
+       (check-false has-sub? "有 pre-index stp 却还有冗余 sub sp"))
      ;; 应该有成对保存/恢复
      (check-true (asm-contains? asm "stp") "缺少 stp")
      (check-true (asm-contains? asm "ldp") "缺少 ldp")
@@ -154,7 +160,31 @@
    ;; ----------------------------------------------------------
    (test-case "008 栈不平衡 (编译成功)"
      (define asm (compile-test-file "008-unbalanced.d"))
-     (check-true (string? asm) "应该编译成功"))))
+     (check-true (string? asm) "应该编译成功"))
+
+   ;; ----------------------------------------------------------
+   ;; 009: save! pre-index 优化
+   ;; ----------------------------------------------------------
+   (test-case "009 save! pre-index 优化"
+     (define asm (compile-test-file "009-save-pre-index.d"))
+     ;; save! 应该用 pre-index stp 一步完成栈分配 + 保存 x29/x30
+     (check-true (asm-contains? asm "stp x29, x30, \\[sp, #-[0-9]+\\]!")
+                 "缺少 pre-index stp x29, x30")
+     ;; 有 pre-index stp 时不应再有单独的 sub sp
+     (check-false (asm-contains? asm "sub sp, sp, #[0-9]+")
+                  "存在冗余 sub sp, sp"))
+
+   ;; ----------------------------------------------------------
+   ;; 010: 中间 load! 不释放栈
+   ;; ----------------------------------------------------------
+   (test-case "010 中间 load! 不释放栈"
+     (define asm (compile-test-file "010-middle-load-no-dealloc.d"))
+     ;; 两次 load x19 都应存在
+     (check-true (>= (asm-count-matches asm "ldr x19, \\[sp, #0\\]") 2)
+                 "应至少包含两次 ldr x19")
+     ;; 栈释放只能发生一次（结尾 load!）
+     (check-equal? (asm-count-matches asm "add sp, sp, #[0-9]+") 1
+                   "中间 load! 不应释放栈"))))
 
 ;; ============================================================
 ;; 执行

@@ -2,30 +2,76 @@
 ;; ABI 配置文件
 ;; ============================================================
 ;;
-;; 格式: (abi-name . config)
-;; config 是一个属性列表：
-;;   gpr   (num-regs banned preserved)  - GPR 配置
-;;   fpr   (num-regs banned preserved)  - FPR 配置
-;;   pred  (num-regs banned preserved)  - Predicate 配置
+;; 新配置格式:
+;;   (gpr (num-regs N) (banned BITS) (preserved BITS) (args 0 1 ...) (return 0))
+;;   (fpr ...)
+;;   (pred ...)
+;;   (extends parent-name)
+;;   (special-regs (sp 31) (fp 29) ...)
+;;
+;; 旧配置格式（向后兼容）:
+;;   (class num-regs banned preserved)
 ;;
 ;;   num-regs:  寄存器总数
 ;;   banned:    位域, 禁止分配
 ;;   preserved: 位域, callee-saved
+;;   args:      参数寄存器列表
+;;   return:    返回寄存器列表
 
 ;; 标准 ARM64 ABI (AAPCS64)
 (aapcs64
-  (gpr  31 #x40000 #x7FF80000)     ; 31 regs, ban x18, preserve x19-x30
-  (fpr  32 #x0     #xFF00)         ; 32 regs, no ban, preserve v8-v15
-  (pred 16 #x0     #x0))           ; 16 regs, no ban, no preserve
+  (gpr
+    (num-regs 31)
+    (banned #x40000)           ; x18 平台保留
+    (preserved #x7FF80000)     ; x19-x30 callee-saved
+    (args 0 1 2 3 4 5 6 7)     ; x0-x7 参数
+    (return 0))                ; x0 返回值
+  (fpr
+    (num-regs 32)
+    (banned #x0)
+    (preserved #xFF00)         ; v8-v15 callee-saved
+    (args 0 1 2 3 4 5 6 7)     ; v0-v7 参数
+    (return 0 1))              ; v0-v1 返回值
+  (pred
+    (num-regs 16)
+    (banned #x0)
+    (preserved #x0))           ; 全部 caller-saved
+  (special-regs
+    (sp 31) (fp 29) (lr 30) (platform 18)))
 
-;; 叶函数
+;; 叶函数 - 继承 aapcs64，覆盖部分配置
 (leaf
-  (gpr  31 #x40000 #x1FF80000)     ; ban x18, preserve x19-x28 (无 x29/x30)
-  (fpr  32 #x0     #xFF00)
-  (pred 16 #x0     #x0))
+  (extends aapcs64)
+  (gpr
+    (num-regs 31)
+    (banned #x40000)
+    (preserved #x1FF80000)))   ; 只保存 x19-x28 (无 x29/x30)
 
 ;; 裸函数 - 完全手动控制
 (naked
-  (gpr  31 #x0 #x0)
-  (fpr  32 #x0 #x0)
-  (pred 16 #x0 #x0))
+  (gpr
+    (num-regs 31)
+    (banned #x0)
+    (preserved #x0)
+    (args 0 1 2 3 4 5 6 7)
+    (return 0))
+  (fpr
+    (num-regs 32)
+    (banned #x0)
+    (preserved #x0)
+    (args 0 1 2 3 4 5 6 7)
+    (return 0 1))
+  (pred
+    (num-regs 16)
+    (banned #x0)
+    (preserved #x0))
+  (special-regs
+    (sp 31) (fp 29) (lr 30) (platform 18)))
+
+;; 自定义 ABI 示例 - 只用 4 个参数寄存器
+;; (my-abi
+;;   (extends aapcs64)
+;;   (gpr
+;;     (num-regs 31)
+;;     (banned #x40100)         ; 禁用 x18 和 x8
+;;     (args 0 1 2 3)))         ; 只用 4 个参数寄存器

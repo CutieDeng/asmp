@@ -131,7 +131,7 @@
    total-stack-size   ; integer - 总栈空间 (不含 SVE)
    sve-stack-slots    ; integer - SVE 使用的 VL 单位数
    first-save-loc     ; (cons bb-id-val ins-idx) | #f - 第一个 save! 位置
-   load-locs          ; hash[(cons bb-id-val ins-idx) → #t] - 所有 load! 位置
+   load-locs          ; hash[(cons bb-id-val ins-idx) → #t] - 需要释放栈的结尾 load! 位置
    all-expansion      ; hash[reg-key → #t] - 'all' 展开后的寄存器集合
    resolved-regs      ; hash[(cons bb-id-val ins-idx) → (listof reg-key)] - 已解析的寄存器
    errors)            ; (listof string)
@@ -238,27 +238,58 @@
   (define-values (slot-table total-size sve-slots)
     (allocate-slots all-reg-keys config))
 
-  ;; 3. 确定第一个 save! 和最后一个 load!
-  ;; 注意：对于有多个基本块的函数，每个 load! 都可能是 "最后一个"
-  ;; 因为不同的执行路径可能到达不同的 load! 点
-  ;; 简化处理：第一个 save! 分配栈，每个 load! 都负责释放
+  ;; 3. 确定第一个 save! 和需要释放栈的结尾 load!
+  ;; 规则:
+  ;; - 第一个 save! 负责分配栈
+  ;; - 仅函数结尾路径上的 load! 负责释放栈
+  ;; - 同一出口块存在多个 load! 时，仅最后一个负责释放
   (define first-save
     (and (pair? save-points)
          (let ([sp (car save-points)])
            (cons (first sp) (second sp)))))
 
-  ;; 所有 load! 位置（每个都需要释放栈）
-  ;; all-load-locs : hash[(cons bb-val idx) → #t]
-  (define all-load-locs
-    (for/hash ([lp (in-list load-points)])
+  ;; 出口块集合
+  ;; exit-bb-set : hash[bb-val → #t]
+  (define exit-bb-set
+    (for/hash ([blk (in-list (fn-exit-blocks fn))])
+      (values (bb-id-val (basic-block-id blk)) #t)))
+
+  ;; 每个出口块中最后一个 load! 点
+  ;; last-load-per-exit : hash[bb-val → (list bb idx reg-keys)]
+  (define last-load-per-exit
+    (for/fold ([h (hash)])
+              ([lp (in-list load-points)])
+      (define bb-val (first lp))
+      (define idx (second lp))
+      (if (not (hash-ref exit-bb-set bb-val #f))
+          h
+          (let ([old (hash-ref h bb-val #f)])
+            (if (or (not old) (> idx (second old)))
+                (hash-set h bb-val lp)
+                h)))))
+
+  ;; 需要释放栈的 load! 点列表
+  ;; dealloc-load-points : (listof (list bb idx reg-keys))
+  (define dealloc-load-points
+    (if (positive? (hash-count last-load-per-exit))
+        (hash-values last-load-per-exit)
+        ;; 回退：若 CFG 未识别到出口 load!，至少保证最后一个 load! 释放一次
+        (if (pair? load-points)
+            (list (last load-points))
+            '())))
+
+  ;; 需要释放栈的 load! 位置集合
+  ;; dealloc-load-locs : hash[(cons bb-val idx) → #t]
+  (define dealloc-load-locs
+    (for/hash ([lp (in-list dealloc-load-points)])
       (values (cons (first lp) (second lp)) #t)))
 
   ;; 4. 栈平衡检查 (仅警告)
   (define balance-warnings
-    (verify-stack-balance fn first-save load-points))
+    (verify-stack-balance fn first-save dealloc-load-points))
 
   (save-load-context slot-table total-size sve-slots
-                     first-save all-load-locs
+                     first-save dealloc-load-locs
                      all-expansion
                      resolved-map
                      balance-warnings))
@@ -730,7 +761,7 @@
          (define point-loc (cons bb-val i))
          (define reg-keys (hash-ref resolved-regs point-loc '()))
 
-         ;; 每个 load! 都负责释放栈空间
+         ;; 仅结尾 load! 负责释放栈空间
          (define should-dealloc?
            (hash-ref load-locs (cons bb-val i) #f))
 
@@ -755,35 +786,87 @@
   (define sve-z-keys (filter-by-class 'sve-z reg-keys))
   (define sve-p-keys (filter-by-class 'sve-p reg-keys))
 
-  ;; 1. 如果是第一个 save!，分配栈空间
-  (define result-after-sub
+  ;; 1. 先构建固定大小寄存器 (GPR/FPR) 的保存指令
+  ;;    这样可以在 is-first? 时把栈分配折叠到首条 store 的 pre-index 中
+  (define fixed-save-ops
+    (let ()
+      (define ops-after-gpr
+        (generate-store-pairs (pvector-empty) gpr-keys slot-table 'x use-paired?))
+      (generate-store-pairs ops-after-gpr fpr-keys slot-table 'q use-paired?)))
+
+  ;; 2. 尝试把 "sub sp, sp, #N" 折叠成首条 "stp/str ..., [sp, #-N]!"
+  (define-values (folded-save-ops folded?)
     (if (and is-first? (> total-size 0))
-        (pvector-cons-right result
-          (make-ins 'sub (list sp-reg sp-reg (make-imm total-size))))
-        result))
+        (fold-stack-allocation-into-first-store fixed-save-ops total-size)
+        (values fixed-save-ops #f)))
 
+  ;; 3. 处理栈分配:
+  ;;    - 若已折叠到 pre-index，不再单独生成 sub
+  ;;    - SVE 分配 (addvl) 逻辑保持不变
   (define result-after-alloc
-    (if (and is-first? (> sve-slots 0))
-        (pvector-cons-right result-after-sub
-          (make-ins 'addvl (list sp-reg sp-reg (make-imm (- sve-slots)))))
-        result-after-sub))
+    (let ([res
+           (if (and is-first? (> total-size 0) (not folded?))
+               (pvector-cons-right result
+                 (make-ins 'sub (list sp-reg sp-reg (make-imm total-size))))
+               result)])
+      (if (and is-first? (> sve-slots 0))
+          (pvector-cons-right res
+            (make-ins 'addvl (list sp-reg sp-reg (make-imm (- sve-slots)))))
+          res)))
 
-  ;; 2. 生成 GPR 存储
-  (define result-after-gpr
-    (generate-store-pairs result-after-alloc gpr-keys slot-table 'x use-paired?))
+  ;; 4. 追加 GPR/FPR 保存指令
+  (define result-after-fixed
+    (for/fold ([res result-after-alloc])
+              ([ins (in-pvector folded-save-ops)])
+      (pvector-cons-right res ins)))
 
-  ;; 3. 生成 FPR 存储
-  (define result-after-fpr
-    (generate-store-pairs result-after-gpr fpr-keys slot-table 'q use-paired?))
-
-  ;; 4. 生成 SVE 存储
+  ;; 5. 生成 SVE 存储
   (define result-after-sve-z
-    (generate-sve-stores result-after-fpr sve-z-keys slot-table 'z))
+    (generate-sve-stores result-after-fixed sve-z-keys slot-table 'z))
 
   (define result-final
     (generate-sve-stores result-after-sve-z sve-p-keys slot-table 'p))
 
   result-final)
+
+;; 判断内存操作数是否是 [sp, #0] (offset 模式)
+(define (sp-zero-offset-mem? mem)
+  (and (ast-mem? mem)
+       (is-sp-reg? (ast-mem-base mem))
+       (eq? (ast-mem-index-mode mem) 'offset)
+       (ast-imm? (ast-mem-offset mem))
+       (= (ast-imm-value (ast-mem-offset mem)) 0)))
+
+;; stp pre-index 立即数可编码性检查
+;; x 寄存器对:  imm ∈ [-512, 504], 步长 8
+;; q 寄存器对:  imm ∈ [-1024, 1008], 步长 16
+(define (stp-pre-index-imm-encodable? reg-kind imm)
+  (match reg-kind
+    ['x (and (<= -512 imm 504) (= (modulo imm 8) 0))]
+    ['q (and (<= -1024 imm 1008) (= (modulo imm 16) 0))]
+    [_ #f]))
+
+;; 尝试把首条 [sp, #0] 的 stp/str 改写成 pre-index 形式:
+;;   stp x29, x30, [sp, #0]  ->  stp x29, x30, [sp, #-N]!
+;; 返回: (values new-ops folded?)
+(define (fold-stack-allocation-into-first-store save-ops total-size)
+  (let loop ([i 0] [n (pvector-length save-ops)])
+    (cond
+      [(>= i n) (values save-ops #f)]
+      [else
+       (define ins (pvector-ref save-ops i))
+       (match ins
+         [(ast-ins 'stp #f (list r1 r2 mem) _)
+          (define imm (- total-size))
+          (if (and (sp-zero-offset-mem? mem)
+                   (ast-reg? r1)
+                   (stp-pre-index-imm-encodable? (ast-reg-kind r1) imm))
+              (values
+               (pvector-set save-ops i
+                            (make-ins 'stp (list r1 r2 (make-sp-mem imm 'pre))))
+               #t)
+              (loop (add1 i) n))]
+         [_ (loop (add1 i) n)])])))
 
 ;; 生成成对存储指令
 (define (generate-store-pairs result keys slot-table kind use-paired?)

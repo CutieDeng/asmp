@@ -28,6 +28,7 @@
          "../semantic/use-def.rkt"
          "../semantic/branch-info.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/inline.rkt"
          "../semantic/save-verify.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
@@ -428,11 +429,17 @@
   (when (>= (verbose-level) 1)
     (eprintf "阶段 3: 寄存器分配\n"))
 
+  ;; 在 CFG 构建后展开 inline 指令，确保 CFG 阶段可见原始 inline
+  (define cfg* (expand-inline-cfg cfg))
+  (define functions*
+    (for/list ([i (in-range (cfg-function-count cfg*))])
+      (cfg-get-function cfg* i)))
+
   ;; 预加载 ABI 配置
   (load-abi-config)
 
   ;; 推断所有函数的 ABI（用于假溢出分析和 ABI 验证）
-  (define abi-info-map (infer-all-abis cfg))
+  (define abi-info-map (infer-all-abis cfg*))
 
   ;; 检查 ABI 推断/验证错误
   (define abi-errors
@@ -445,7 +452,7 @@
       (eprintf "警告: ~a\n" err)))
 
   (define results
-    (for/list ([fn (in-list functions)])
+    (for/list ([fn (in-list functions*)])
       (define abi (or (resolve-function-abi fn) arm64-abi))
       (define config
         (make-pipeline-config

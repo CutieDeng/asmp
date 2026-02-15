@@ -329,9 +329,6 @@
   ;; 先尝试 .element@index 语法 (SIMD lane 访问)
   (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\.(1?[0-9]?[BHSDQbhsdq]))(@([0-9]+))?(/([mz]))?$" str)
     [(list _ kind-s name-s _ elem-s _ index-s _ pred-s)
-     ;; GPR (x, w) 不应该有元素后缀
-     (when (member kind-s '("x" "w"))
-       (error 'parse-register "GPR 虚拟寄存器不支持元素后缀: ~a" str))
      (ast-reg (string->symbol kind-s)
               (string->symbol name-s)
               #f  ; 无 group-size
@@ -343,9 +340,6 @@
      ;; 再尝试 *group@index.element 语法 (寄存器组)
      (match (regexp-match #rx"^([xwzvpbhsdq])\\.([^.\\*@/]+)(\\*([0-9]+))?(@([0-9]+))?(\\.(1?[0-9]?[BHSDQbhsdq]))?(/([mz]))?$" str)
        [(list _ kind-s name-s _ group-s _ index-s _ elem-s _ pred-s)
-        ;; GPR (x, w) 不应该有元素后缀
-        (when (and elem-s (member kind-s '("x" "w")))
-          (error 'parse-register "GPR 虚拟寄存器不支持元素后缀: ~a" str))
         (ast-reg (string->symbol kind-s)
                  (string->symbol name-s)
                  (and group-s (string->number group-s))
@@ -568,6 +562,11 @@
     [(list ': 'load! args ...)
      (define-values (regs size-spec) (parse-save-load-args args stx))
      (ast-directive 'load! #f (list regs size-spec) loc)]
+    ;; 内联调用指令
+    ;; 语法: (: inline function-name)
+    [(list ': 'inline target)
+     #:when (symbol? target)
+     (ast-directive 'inline target '() loc)]
     ;; 弱 mov 指令 (合并提示)
     ;; 语法: (: = dst src)
     ;; 若 dst 和 src 分配到同一寄存器则不生成指令，否则生成 mov

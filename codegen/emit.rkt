@@ -13,6 +13,7 @@
 
 (require "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
+         "../syntax/operand-type.rkt"
          "../pipeline/pipeline.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt")
@@ -332,6 +333,13 @@
           (equal? (ast-reg-id dst) (ast-reg-id src)))]
     [_ #f]))
 
+;; mrs/msr 的系统寄存器操作数应按原名输出，不参与 Apple 符号前缀规则。
+(define (sysreg-operand? mnem op)
+  (and (memq mnem '(mrs msr))
+       (ast-label? op)
+       (not (ast-label-reloc op))
+       (label-looks-like-system-reg? (ast-label-name op))))
+
 ;; 直接写入端口版本
 (define (emit-instruction/port ins port)
   (match-define (ast-ins mnem suffix operands _) ins)
@@ -358,7 +366,9 @@
         (if (or (ast-shift? prev) (ast-extend? prev))
             (port-write-string port " ")    ; 空格: LSL #16
             (port-write-string port ", "))) ; 逗号: w1, #123
-      (emit-operand/port op port))))
+      (if (sysreg-operand? mnem op)
+          (port-display port (ast-label-name op))
+          (emit-operand/port op port)))))
 
 ;; 返回字符串版本 (兼容)
 (define (emit-instruction ins)

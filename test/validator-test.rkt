@@ -34,6 +34,14 @@
 (define (lbl name) (ast-label name #f no-srcloc))
 (define (shift-node kind [amount #f]) (ast-shift kind amount no-srcloc))
 
+;; 提取验证结果中的第一条智能建议文本
+(define (first-smart-suggestion result)
+  (define hints (validation-result-hints result))
+  (define smart-hints
+    (filter (lambda (h) (eq? (validation-hint-kind h) 'smart-suggestion)) hints))
+  (and (pair? smart-hints)
+       (validation-hint-data (car smart-hints))))
+
 (define validator-tests
   (test-suite
    "Validator 单元测试"
@@ -117,6 +125,54 @@
       (define ins (make-ins 'xyzinvalid (xreg 0)))
       (define result (validate-instruction ins))
       (check-equal? (validation-result-mnemonic result) 'xyzinvalid)))
+
+   (test-suite
+    "validate-instruction: 非法寄存器元素后缀"
+
+    (test-case "q0.16b 在验证阶段报错"
+      (define ins (parse-instruction '(movi q0.16b 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (check-equal? (validation-result-error-layer result) 'layer2)
+      (check-true
+       (string-contains? (validation-result-error-message result)
+                         "q 寄存器不支持元素后缀")))
+
+    (test-case "x0.8b 在验证阶段报错"
+      (define ins (parse-instruction '(add x0.8b x1 x2)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (check-equal? (validation-result-error-layer result) 'layer2)
+      (check-true
+       (string-contains? (validation-result-error-message result)
+                         "GPR 寄存器不支持元素后缀")))
+
+    (test-case "x.a.8b 在验证阶段报错"
+      (define ins (parse-instruction '(add x.a.8b x1 x2)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (check-equal? (validation-result-error-layer result) 'layer2)
+      (check-true
+       (string-contains? (validation-result-error-message result)
+                         "GPR 寄存器不支持元素后缀")))
+
+    (test-case "未知助记符优先于 q 元素后缀错误"
+      (define ins (parse-instruction '(xyzinvalid q0.16b)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (check-equal? (validation-result-error-layer result) 'mnemonic)
+      (check-true
+       (string-contains? (validation-result-error-message result)
+                         "未知指令助记符")))
+
+    (test-case "未知助记符优先于 GPR 元素后缀错误"
+      (define ins (parse-instruction '(xyzinvalid x0.8b)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (check-equal? (validation-result-error-layer result) 'mnemonic)
+      (check-true
+       (string-contains? (validation-result-error-message result)
+                         "未知指令助记符"))))
 
    ;; --------------------------------------------------------
    ;; validate-instruction: 别名指令
@@ -248,13 +304,92 @@
       (define result (validate-instruction ins))
       ;; 如果失败，应该包含智能建议
       (when (validation-error? result)
-        (define hints (validation-result-hints result))
-        (define smart-hints
-          (filter (lambda (h) (eq? (validation-hint-kind h) 'smart-suggestion)) hints))
-        (when (pair? smart-hints)
-          (check-true (string-contains?
-                       (validation-hint-data (car smart-hints))
-                       "movi"))))))))
+        (define msg (first-smart-suggestion result))
+        (when msg
+          (check-true (string-contains? msg "movi")))))
+
+    (test-case "mov x0, s.a 触发 fmov 建议且类型差异定位更准确"
+      (define ins (make-ins 'mov (xreg 0) (sreg 'a)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "fmov"))
+
+      ;; 选“最接近签名”后，应只指出源操作数类型不匹配，而不是两边都错
+      (define hints (validation-result-hints result))
+      (define mismatch-hints
+        (filter (lambda (h) (eq? (validation-hint-kind h) 'type-mismatch)) hints))
+      (check-equal? (length mismatch-hints) 1)
+      (check-equal? (validation-hint-data (car mismatch-hints))
+                    '(2 simd-v simd-scalar)))
+
+    (test-case "mov v0.4s, w1 建议使用 ins/dup"
+      (define ins (make-ins 'mov (vreg 0 '4s) (wreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (or (string-contains? msg "ins")
+                      (string-contains? msg "dup"))))
+
+    (test-case "fmov w0, w1 建议使用 mov"
+      (define ins (make-ins 'fmov (wreg 0) (wreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "mov")))
+
+    (test-case "umov w0, s1 建议改用向量 lane 或 fmov"
+      (define ins (make-ins 'umov (wreg 0) (sreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (or (string-contains? msg "lane")
+                      (string-contains? msg "fmov"))))
+
+    (test-case "ins v0.4s, x1 提示 GPR 源应为 w 寄存器"
+      (define ins (make-ins 'ins (vreg 0 '4s) (xreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "w 寄存器")))
+
+    (test-case "sha1h s0, w1 提示先 fmov 到 s"
+      (define ins (make-ins 'sha1h (sreg 0) (wreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "fmov")))
+
+    (test-case "sha1c s0, s1, s2 提示第3操作数应为向量"
+      (define ins (make-ins 'sha1c (sreg 0) (sreg 1) (sreg 2)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "vN.4s")))
+
+    (test-case "sha1p v0.4s, s1, v2.4s 提示第1操作数应为标量"
+      (define ins (make-ins 'sha1p (vreg 0 '4s) (sreg 1) (vreg 2 '4s)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "第 1 个操作数")))
+
+    (test-case "sha1su1 v0.4s, s1 提示只接受向量"
+      (define ins (make-ins 'sha1su1 (vreg 0 '4s) (sreg 1)))
+      (define result (validate-instruction ins))
+      (check-true (validation-error? result))
+      (define msg (first-smart-suggestion result))
+      (check-not-false msg)
+      (check-true (string-contains? msg "只接受向量"))))))
 
 ;; ============================================================
 ;; 需要引入 imm-range 以测试 constraint hint

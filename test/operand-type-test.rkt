@@ -285,6 +285,26 @@
       (check-equal? (classify-ast-operand (ast-label "loop" #f no-srcloc))
                     'label))
 
+    (test-case "系统寄存器标签（具名）"
+      (check-equal? (classify-ast-operand (ast-label 'DAIF #f no-srcloc))
+                    'system-reg)
+      (check-equal? (classify-ast-operand (ast-label 'CurrentEL #f no-srcloc))
+                    'system-reg)
+      (check-equal? (classify-ast-operand (ast-label 'TPIDR_EL0 #f no-srcloc))
+                    'system-reg))
+
+    (test-case "系统寄存器标签（编码式）"
+      (check-equal? (classify-ast-operand (ast-label 'S3_3_C14_C0_2 #f no-srcloc))
+                    'system-reg))
+
+    (test-case "系统寄存器标签（名称模式）"
+      (check-equal? (classify-ast-operand (ast-label 'DBGBVR<m>_EL1 #f no-srcloc))
+                    'system-reg)
+      (check-equal? (classify-ast-operand (ast-label 'TRCACATR<m> #f no-srcloc))
+                    'system-reg)
+      (check-equal? (classify-ast-operand (ast-label 'S3_<op1>_C<Cn>_C<Cm>_<op2> #f no-srcloc))
+                    'system-reg))
+
     (test-case "移位 → keyword"
       (check-equal? (classify-ast-operand (ast-shift 'lsl 3 no-srcloc))
                     'keyword))

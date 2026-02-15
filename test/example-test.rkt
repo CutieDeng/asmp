@@ -13,6 +13,7 @@
          "../parser/frontend.rkt"
          "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/inline.rkt"
          "../pipeline/pipeline.rkt"
          "../codegen/emit.rkt")
 
@@ -39,7 +40,7 @@
         (parse-result-instruction r)))
 
     ;; 构建 CFG
-    (define cfg (build-cfg items))
+    (define cfg (expand-inline-cfg (build-cfg items)))
 
     ;; 对每个函数运行流水线
     (define compiled-fns

@@ -67,7 +67,9 @@
 (define index-mode/c (or/c 'offset 'pre 'post))
 (define pred-mode/c (or/c #f 'm 'z))
 (define reloc-kind/c (or/c #f 'PAGE 'PAGEOFF 'GOTPAGE 'GOTPAGEOFF))
-(define directive-kind/c (or/c 'function 'end-function 'label 'section 'align 'global 'extern))
+(define directive-kind/c
+  (or/c 'function 'end-function 'label 'section 'align 'global 'extern
+        'save! 'load! 'weak-mov 'inline))
 
 ;; ============================================================
 ;; AST 结构 (所有节点携带 srcloc)

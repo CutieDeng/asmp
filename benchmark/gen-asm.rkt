@@ -6,6 +6,7 @@
 (require "../parser/frontend.rkt"
          "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/inline.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
          "../codegen/emit.rkt")
@@ -24,7 +25,7 @@
     (for/list ([r (parse-results-items results)]
                #:when (parse-result-ok? r))
       (parse-result-instruction r)))
-  (define cfg (build-cfg items))
+  (define cfg (expand-inline-cfg (build-cfg items)))
 
   (parameterize ([current-emit-config
                   (if use-apple-config? apple-emit-config default-emit-config)])

@@ -157,6 +157,31 @@
      (define cfg (build-test-cfg items))
      (define fn (cfg-get-function cfg 0))
      (define errors (verify-label-references fn cfg))
+     (check-true (pvector-empty? errors)))
+
+   (test-case "mrs 的系统寄存器操作数不应被当成标签引用"
+     (define items (parse-items
+                    '((: function test)
+                      (mrs x0 CurrentEL)
+                      (mrs x1 DAIF)
+                      (ret)
+                      (: end-function))))
+     (define cfg (build-test-cfg items))
+     (define fn (cfg-get-function cfg 0))
+     (define errors (verify-label-references fn cfg))
+     (check-true (pvector-empty? errors)))
+
+   (test-case "mrs 的系统寄存器名称模式不应被当成标签引用"
+     (define items (parse-items
+                    '((: function test)
+                      (mrs x0 DBGBVR<m>_EL1)
+                      (mrs x1 TRCACATR<m>)
+                      (mrs x2 S3_<op1>_C<Cn>_C<Cm>_<op2>)
+                      (ret)
+                      (: end-function))))
+     (define cfg (build-test-cfg items))
+     (define fn (cfg-get-function cfg 0))
+     (define errors (verify-label-references fn cfg))
      (check-true (pvector-empty? errors)))))
 
 ;; ============================================================

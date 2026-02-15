@@ -109,6 +109,75 @@
   (define index (get-alias-transform-index))
   (hash-ref index (list mnem class sig) #f))
 
+;; 检查“语法可解析但语义非法”的寄存器元素后缀
+;; 返回: (list index ast-reg reason) 或 #f
+;; reason:
+;;   'q-arrangement  q 寄存器带了元素后缀
+;;   'gpr-element    x/w 寄存器带了元素后缀
+(define (find-invalid-reg-element operands)
+  (for/first ([op (in-list operands)]
+              [i (in-naturals)]
+              #:when (and (ast-reg? op)
+                          (ast-reg-element op)
+                          (memq (ast-reg-kind op) '(q x w))))
+    (define reason
+      (case (ast-reg-kind op)
+        [(q) 'q-arrangement]
+        [(x w) 'gpr-element]
+        [else #f]))
+    (and reason (list i op reason))))
+
+(define (suggest-v-form reg)
+  (define raw (ast->string reg))
+  (if (and (> (string-length raw) 0)
+           (memq (string-ref raw 0) '(#\q #\x #\w)))
+      (string-append "v" (substring raw 1))
+      "v0.16b"))
+
+(define (remove-element-form reg)
+  (ast->string (struct-copy ast-reg reg [element #f])))
+
+(define (format-invalid-reg-element-message bad-op)
+  (define idx (first bad-op))
+  (define reg (second bad-op))
+  (define reason (third bad-op))
+  (define raw (ast->string reg))
+  (case reason
+    [(q-arrangement)
+     (define suggestion (suggest-v-form reg))
+     (format "第 ~a 个操作数非法: q 寄存器不支持元素后缀 (~a)，请改用 ~a"
+             (add1 idx) raw suggestion)]
+    [(gpr-element)
+     (define plain (remove-element-form reg))
+     (define v-suggestion (suggest-v-form reg))
+     (format "第 ~a 个操作数非法: GPR 寄存器不支持元素后缀 (~a)，请改为 ~a；若要向量寄存器请用 ~a"
+             (add1 idx) raw plain v-suggestion)]
+    [else
+     (format "第 ~a 个操作数非法: 不支持的寄存器后缀 (~a)" (add1 idx) raw)]))
+
+(define (make-invalid-reg-element-error mnem actual-class actual-sig bad-op)
+  (define reg (second bad-op))
+  (define reason (third bad-op))
+  (define hint-msg
+    (case reason
+      [(q-arrangement)
+       (format "q 仅表示 128-bit 寄存器名；带排列请使用 ~a"
+               (suggest-v-form reg))]
+      [(gpr-element)
+       (format "GPR 仅支持 x/w 形式；请移除后缀（如 ~a），或改用向量寄存器 ~a"
+               (remove-element-form reg)
+               (suggest-v-form reg))]
+      [else
+       "请检查寄存器后缀写法"]))
+  (make-error 'layer2
+              mnem
+              actual-class
+              actual-sig
+              (format-invalid-reg-element-message bad-op)
+              (list (validation-hint
+                     'smart-suggestion
+                     hint-msg))))
+
 ;; ============================================================
 ;; 主验证函数
 ;; ============================================================
@@ -119,6 +188,8 @@
      ;; 提取实际信息 (使用缓存计算)
      (define actual-sig (map classify-ast-operand operands))
      (define actual-class (layer2->layer1/cached actual-sig))
+     ;; 记录“语法可解析但语义非法”的寄存器写法（延后到验证阶段报错）
+     (define bad-reg-element (find-invalid-reg-element operands))
 
      ;; === 阶段 1: 检查助记符 ===
      (define l1-classes (lookup-layer1-classes mnem))
@@ -131,12 +202,27 @@
        ;; === 阶段 2: 检查 Layer1 ===
        [(not (member actual-class l1-classes))
         (define actual-count (get-pre-count actual-class))
+        (define actual-mem? (has-memory? actual-class))
         (define allowed-counts (remove-duplicates (map get-pre-count l1-classes)))
+        (define any-allowed-mem? (ormap has-memory? l1-classes))
+        (define msg
+          (cond
+            ;; 情况1: pre-count 相同但缺少内存操作数
+            [(and (not actual-mem?) any-allowed-mem?
+                  (member actual-count allowed-counts))
+             (format "~a 缺少内存操作数 [...]" mnem)]
+            ;; 情况2: pre-count 相同但不应有内存操作数
+            [(and actual-mem? (not any-allowed-mem?)
+                  (member actual-count allowed-counts))
+             (format "~a 不需要内存操作数" mnem)]
+            ;; 情况3: 常规数量不匹配
+            [else
+             (format "~a 有 ~a 个操作数，但支持: ~a 个"
+                     mnem actual-count
+                     (string-join (map number->string (sort allowed-counts <)) "/"))]))
         (make-error 'layer1 mnem actual-class actual-sig
-                    (format "~a 有 ~a 个操作数，但支持: ~a 个"
-                            mnem actual-count
-                            (string-join (map number->string (sort allowed-counts <)) "/"))
-                    (layer1-hints actual-class l1-classes))]
+                    msg
+                    (layer1-hints mnem actual-class l1-classes))]
 
        [else
         ;; === 阶段 3: 检查 Layer2 ===
@@ -148,9 +234,14 @@
 
         (cond
           [(not matching-sig)
-           (make-error 'layer2 mnem actual-class actual-sig
-                       (format "~a 操作数类型不匹配" mnem)
-                       (layer2-hints mnem actual-sig actual-class l2-sigs))]
+           (if bad-reg-element
+               (make-invalid-reg-element-error mnem actual-class actual-sig bad-reg-element)
+               (make-error 'layer2 mnem actual-class actual-sig
+                           (format "~a 操作数类型不匹配" mnem)
+                           (layer2-hints mnem operands actual-sig actual-class l2-sigs)))]
+
+          [bad-reg-element
+           (make-invalid-reg-element-error mnem actual-class actual-sig bad-reg-element)]
 
           [else
            ;; === 阶段 3.5: 检查谓词限定符 ===
@@ -604,27 +695,82 @@
         (set! hints (cons (hint:constraint field-name value constraint) hints)))))
   (remove-duplicates (reverse hints)))
 
-;; 生成 Layer1 提示
-(define (layer1-hints actual allowed)
-  (define actual-count (get-pre-count actual))
-  (define allowed-counts (map get-pre-count allowed))
+;; ARM 模板 → DSL 示例字符串
+;; "WZR, [SP]" → "(ldapurb w0 [sp])"
+(define (template->dsl-example mnem template)
+  (define cleaned (string-downcase template))
+  ;; 替换零寄存器占位为常见寄存器名
+  (define friendly (regexp-replace* #rx"wzr" cleaned "w0"))
+  (define friendly2 (regexp-replace* #rx"xzr" friendly "x0"))
+  ;; 移除逗号
+  (define no-commas (regexp-replace* #rx", *" friendly2 " "))
+  ;; 替换立即数占位
+  (define with-imm (regexp-replace* #rx"s?u?integer" no-commas "(imm N)"))
+  ;; 移除 pre-index 的 !
+  (define no-bang (regexp-replace* #rx" *!" with-imm ""))
+  (define operands (string-trim no-bang))
+  (if (string=? operands "")
+      (format "(~a)" mnem)
+      (format "(~a ~a)" mnem operands)))
+
+;; 从整合表提取指令的 ARM 模板，转为 DSL 正例
+(define (get-usage-examples mnem)
+  (define table (get-integrated-table))
+  (define entry (hash-ref table mnem #f))
   (cond
-    [(andmap (λ (c) (> c actual-count)) allowed-counts)
-     (list (hint:operand-count 'too-few))]
-    [(andmap (λ (c) (< c actual-count)) allowed-counts)
-     (list (hint:operand-count 'too-many))]
-    [(and (not (has-memory? actual)) (ormap has-memory? allowed))
-     (list (validation-hint 'memory-required #t))]
-    [(and (has-memory? actual) (not (ormap has-memory? allowed)))
-     (list (validation-hint 'memory-not-allowed #t))]
+    [(not entry) '()]
+    [(pair? entry)
+     ;; 文件加载格式: (mnem (l1 ((sig) enc ...) ...) ...)
+     (define templates
+       (for*/list ([l1-entry (in-list (cdr entry))]
+                   #:when (pair? l1-entry)
+                   [sig-entry (in-list (cdr l1-entry))]
+                   #:when (and (pair? sig-entry) (pair? (cdr sig-entry)))
+                   [enc (in-value (cadr sig-entry))]  ; 取第一个编码
+                   #:when (and (list? enc) (>= (length enc) 2)))
+         (cadr enc)))  ; 模板是编码的第2个元素
+     (remove-duplicates
+      (map (λ (t) (template->dsl-example mnem t)) templates))]
+    [(hash? entry)
+     ;; 运行时构建格式: hash[l1 -> hash[l2-key -> (listof enc)]]
+     (define templates
+       (for*/list ([(l1 l2-table) (in-hash entry)]
+                   [(l2-key encs) (in-hash l2-table)]
+                   #:when (pair? encs)
+                   [enc (in-value (car encs))]  ; 取第一个编码
+                   #:when (and (list? enc) (>= (length enc) 2)))
+         (cadr enc)))
+     (remove-duplicates
+      (map (λ (t) (template->dsl-example mnem t)) templates))]
     [else '()]))
 
+;; 生成 Layer1 提示
+(define (layer1-hints mnem actual allowed)
+  (define actual-count (get-pre-count actual))
+  (define allowed-counts (map get-pre-count allowed))
+  (define base-hints
+    (cond
+      [(andmap (λ (c) (> c actual-count)) allowed-counts)
+       (list (hint:operand-count 'too-few))]
+      [(andmap (λ (c) (< c actual-count)) allowed-counts)
+       (list (hint:operand-count 'too-many))]
+      [(and (not (has-memory? actual)) (ormap has-memory? allowed))
+       (list (validation-hint 'memory-required #t))]
+      [(and (has-memory? actual) (not (ormap has-memory? allowed)))
+       (list (validation-hint 'memory-not-allowed #t))]
+      [else '()]))
+  ;; 追加正例提示
+  (define examples (get-usage-examples mnem))
+  (if (pair? examples)
+      (append base-hints (list (validation-hint 'usage-example examples)))
+      base-hints))
+
 ;; 生成 Layer2 提示
-(define (layer2-hints mnem actual-sig actual-class l2-sigs)
+(define (layer2-hints mnem operands actual-sig actual-class l2-sigs)
   (define result '())
 
   ;; 首先检查智能建议（最有用）
-  (define smart-hint (generate-smart-suggestion mnem actual-sig))
+  (define smart-hint (generate-smart-suggestion mnem operands actual-sig))
   (when smart-hint
     (set! result (cons smart-hint result)))
 
@@ -637,34 +783,259 @@
   (define same-len-sigs
     (filter (lambda (s) (= (length s) (length actual-sig))) l2-sigs))
   (when (pair? same-len-sigs)
-    (define best-sig (car same-len-sigs))
+    (define best-sig (select-best-signature actual-sig same-len-sigs))
     (for ([i (in-naturals)]
           [act (in-list actual-sig)]
           [exp (in-list best-sig)]
           #:unless (operand-type-compatible? act exp))
       (set! result (cons (hint:type-mismatch (add1 i) exp act) result))))
 
+  ;; 追加正例提示
+  (define examples (get-usage-examples mnem))
+  (when (pair? examples)
+    (set! result (cons (validation-hint 'usage-example examples) result)))
+
   (reverse result))
 
+;; 选择最接近实际签名的模板签名，避免“第一个签名”导致误导性提示
+(define (select-best-signature actual-sig candidates)
+  (argmin
+   (lambda (sig)
+     (for/sum ([act (in-list actual-sig)]
+               [exp (in-list sig)])
+       (operand-distance act exp)))
+   candidates))
+
+;; 操作数距离: 0=兼容, 1=同家族不兼容, 4=跨家族
+(define (operand-distance act exp)
+  (cond
+    [(operand-type-compatible? act exp) 0]
+    [(eq? (type-family act) (type-family exp)) 1]
+    [else 4]))
+
+(define (type-family t)
+  (cond
+    [(memq t '(gpr-64 gpr-32 gpr-64-sp gpr-32-sp)) 'gpr]
+    [(memq t '(simd-scalar simd-vector simd-v simd-element)) 'simd]
+    [(eq? t 'sve-z) 'sve-z]
+    [(eq? t 'sve-p) 'sve-p]
+    [(memq t '(immediate negimm float-const)) 'imm]
+    [(eq? t 'memory) 'mem]
+    [(eq? t 'label) 'label]
+    [(eq? t 'keyword) 'keyword]
+    [else t]))
+
 ;; 生成智能建议 - 根据常见错误模式给出具体建议
-(define (generate-smart-suggestion mnem actual-sig)
-  (match (list mnem actual-sig)
-    ;; mov 向量, 立即数 → 建议 movi 或 dup
-    [(list 'mov (list (or 'simd-vector 'simd-v) 'immediate))
-     (validation-hint 'smart-suggestion
-       "向量加载立即数请用 movi (如 movi v0.8b, #1) 或 dup (如 dup v0.8b, w0)")]
+(define (generate-smart-suggestion mnem operands actual-sig)
+  (define (fmt-op i)
+    (if (< i (length operands))
+        (ast->string (list-ref operands i))
+        (format "<op~a>" (add1 i))))
+  (define matched-rule
+    (for/first ([rule (in-list smart-suggestion-rules)]
+                #:when (and (eq? mnem (car rule))
+                            (signature-pattern-matches? actual-sig (cadr rule))))
+      rule))
+  (and matched-rule
+       (validation-hint 'smart-suggestion
+                        ((caddr matched-rule) fmt-op operands actual-sig))))
 
-    ;; mov 向量, 向量 → 建议正确的 mov 格式
-    [(list 'mov (list (or 'simd-vector 'simd-v) (or 'simd-vector 'simd-v)))
-     (validation-hint 'smart-suggestion
-       "向量复制请确保排列一致 (如 mov v0.16b, v1.16b)")]
+;; 智能建议规则:
+;; (list mnemonic signature-pattern builder)
+;; - signature-pattern: 每个元素可为 symbol 或 (listof symbol) 表示“其中之一”
+;; - builder: (fmt-op operands actual-sig) -> string
+(define smart-suggestion-rules
+  (list
+   ;; mov 家族
+   (list 'mov
+         '((simd-vector simd-v) immediate)
+         (lambda (_fmt-op _operands _actual-sig)
+           "向量加载立即数请用 movi (如 movi v0.8b, #1) 或 dup (如 dup v0.8b, w0)"))
 
-    ;; add 向量, 向量, 立即数 → 建议正确格式
-    [(list 'add (list (or 'simd-vector 'simd-v) (or 'simd-vector 'simd-v) 'immediate))
-     (validation-hint 'smart-suggestion
-       "向量加法不支持立即数，请用寄存器 (如 add v0.4s, v1.4s, v2.4s)")]
+   (list 'mov
+         '((simd-vector simd-v) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "向量复制请确保排列一致 (如 mov v0.16b, v1.16b)"))
 
-    [_ #f]))
+   (list 'mov
+         '((gpr-64 gpr-32) simd-scalar)
+         (lambda (fmt-op _operands _actual-sig)
+           (format "MOV 不支持 GPR 与 SIMD 标量直接传值；请改用 fmov (如 fmov ~a ~a)"
+                   (fmt-op 0) (fmt-op 1))))
+
+   (list 'mov
+         '(simd-scalar (gpr-64 gpr-32))
+         (lambda (fmt-op _operands _actual-sig)
+           (format "MOV 不支持 SIMD 标量与 GPR 直接传值；请改用 fmov (如 fmov ~a ~a)"
+                   (fmt-op 0) (fmt-op 1))))
+
+   (list 'mov
+         '((gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "从向量提取到 GPR 请用 umov，并显式指定 lane (如 umov w0 v1.s@0)"))
+
+   (list 'mov
+         '((simd-vector simd-v) (gpr-64 gpr-32))
+         (lambda (_fmt-op _operands _actual-sig)
+           "将 GPR 写入向量请用 ins 指定 lane (如 ins v0.s@0, w1)；若需要广播请用 dup"))
+
+   ;; fmov 家族
+   (list 'fmov
+         '((gpr-64 gpr-32) (gpr-64 gpr-32))
+         (lambda (fmt-op _operands _actual-sig)
+           (format "FMOV 不用于 GPR↔GPR 传值；请改用 mov (如 mov ~a ~a)"
+                   (fmt-op 0) (fmt-op 1))))
+
+   (list 'fmov
+         '((gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "从向量提取到 GPR 通常应使用 umov 并指定 lane (如 umov w0 v1.s@0)"))
+
+   (list 'fmov
+         '((simd-vector simd-v) (gpr-64 gpr-32))
+         (lambda (_fmt-op _operands _actual-sig)
+           "向量写入请使用 ins (单 lane) 或 dup (广播)；fmov 主要用于标量/位模式传递"))
+
+   ;; umov 家族
+   (list 'umov
+         '((gpr-64 gpr-32) simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "UMOV 需要从向量 lane 提取：请使用向量源并显式 lane (如 umov w0 v1.s@0)；标量互转请用 fmov"))
+
+   (list 'umov
+         '((simd-vector simd-v) (gpr-64 gpr-32))
+         (lambda (_fmt-op _operands _actual-sig)
+           "UMOV 方向是 向量→GPR；写回向量请用 ins (如 ins v0.s@0, w1)"))
+
+   (list 'umov
+         '(simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "UMOV 目标必须是 GPR (w/x)，不是 SIMD 标量"))
+
+   ;; ins 家族
+   (list 'ins
+         '((simd-vector simd-v) gpr-64)
+         (lambda (_fmt-op _operands _actual-sig)
+           "INS 的 GPR 源操作数应为 w 寄存器；请改用 wN 并指定目标 lane (如 ins v0.s@0, w1)"))
+
+   (list 'ins
+         '((gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "INS 方向是写入向量；若要从向量读到 GPR，请用 umov"))
+
+   (list 'ins
+         '(simd-scalar (gpr-64 gpr-32))
+         (lambda (_fmt-op _operands _actual-sig)
+           "INS 目标应是向量 lane (如 v0.s@0)，不是 s/d/q 标量寄存器"))
+
+   ;; SHA1 指令家族
+   (list 'sha1h
+         '(simd-scalar (gpr-64 gpr-32))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1h 的源操作数必须是 s 寄存器；若当前在 w/x 中，请先 fmov 到 s (如 fmov s1, w1; sha1h s0, s1)"))
+
+   (list 'sha1h
+         '((gpr-64 gpr-32) simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1h 的目标操作数必须是 s 寄存器；若后续需要 GPR，可在结果后 fmov 回 w/x"))
+
+   (list 'sha1h
+         '((simd-vector simd-v) simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1h 不接受向量目的寄存器；请使用 sN（标量）"))
+
+   (list 'sha1h
+         '(simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1h 的源操作数必须是 sN 标量，不是 v 向量"))
+
+   (list 'sha1c
+         '((simd-vector simd-v) simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1c 的第 1 个操作数必须是 s 寄存器（E 状态），不是向量"))
+
+   (list 'sha1c
+         '(simd-scalar (gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1c 的第 2 个操作数必须是 s 寄存器；GPR 请先 fmov 到 s"))
+
+   (list 'sha1c
+         '(simd-scalar simd-scalar simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1c 的第 3 个操作数必须是向量 vN.4s（ABCD），不是标量"))
+
+   (list 'sha1p
+         '((simd-vector simd-v) simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1p 的第 1 个操作数必须是 s 寄存器（E 状态），不是向量"))
+
+   (list 'sha1p
+         '(simd-scalar (gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1p 的第 2 个操作数必须是 s 寄存器；GPR 请先 fmov 到 s"))
+
+   (list 'sha1p
+         '(simd-scalar simd-scalar simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1p 的第 3 个操作数必须是向量 vN.4s（ABCD），不是标量"))
+
+   (list 'sha1m
+         '((simd-vector simd-v) simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1m 的第 1 个操作数必须是 s 寄存器（E 状态），不是向量"))
+
+   (list 'sha1m
+         '(simd-scalar (gpr-64 gpr-32) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1m 的第 2 个操作数必须是 s 寄存器；GPR 请先 fmov 到 s"))
+
+   (list 'sha1m
+         '(simd-scalar simd-scalar simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1m 的第 3 个操作数必须是向量 vN.4s（ABCD），不是标量"))
+
+   (list 'sha1su0
+         '(simd-scalar (simd-vector simd-v) (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1su0 只接受向量操作数（vN.4s）；第 1 个操作数不能是标量"))
+
+   (list 'sha1su0
+         '((simd-vector simd-v) simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1su0 只接受向量操作数（vN.4s）；第 2 个操作数不能是标量"))
+
+   (list 'sha1su0
+         '((simd-vector simd-v) (simd-vector simd-v) simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1su0 只接受向量操作数（vN.4s）；第 3 个操作数不能是标量"))
+
+   (list 'sha1su1
+         '(simd-scalar (simd-vector simd-v))
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1su1 只接受向量操作数（vN.4s）；第 1 个操作数不能是标量"))
+
+   (list 'sha1su1
+         '((simd-vector simd-v) simd-scalar)
+         (lambda (_fmt-op _operands _actual-sig)
+           "sha1su1 只接受向量操作数（vN.4s）；第 2 个操作数不能是标量"))
+
+   ;; 其他通用规则
+   (list 'add
+         '((simd-vector simd-v) (simd-vector simd-v) immediate)
+         (lambda (_fmt-op _operands _actual-sig)
+           "向量加法不支持立即数，请用寄存器 (如 add v0.4s, v1.4s, v2.4s)"))))
+
+(define (signature-pattern-matches? actual-sig pattern-sig)
+  (and (= (length actual-sig) (length pattern-sig))
+       (for/and ([actual (in-list actual-sig)]
+                 [pattern (in-list pattern-sig)])
+         (type-pattern-matches? actual pattern))))
+
+(define (type-pattern-matches? actual pattern)
+  (cond
+    [(symbol? pattern) (eq? actual pattern)]
+    [(and (list? pattern) (pair? pattern)) (member actual pattern)]
+    [else #f]))
 
 ;; 检查添加 lsl 0 后缀是否能匹配
 (define (check-suffix-hint mnem actual-sig actual-class)
@@ -819,8 +1190,8 @@
 ;; 操作数类型的用户友好名称
 (define (friendly-type-name t)
   (match t
-    ['gpr-64 "64位通用寄存器 (x0-x30)"]
-    ['gpr-32 "32位通用寄存器 (w0-w30)"]
+    ['gpr-64 "64位通用寄存器 (x0-x30/xzr)"]
+    ['gpr-32 "32位通用寄存器 (w0-w30/wzr)"]
     ['simd-scalar "SIMD标量 (b/h/s/d/q)"]
     ['simd-vector "SIMD向量 (v0.8b等)"]
     ['simd-v "SIMD向量 (v0.8b等)"]  ; 别名中的简化类型
@@ -865,6 +1236,9 @@
     [(validation-hint 'tied-operand (list indices field-name regs-info))
      (define pos-strs (string-join (map (lambda (i) (number->string (add1 i))) indices) ", "))
      (format "    - 操作数 ~a 必须使用同一寄存器 (字段: ~a)" pos-strs field-name)]
+    [(validation-hint 'usage-example examples)
+     (format "    - 正确用法: ~a"
+             (string-join (take examples (min 3 (length examples))) " | "))]
     [_ "    - (未知提示)"]))
 
 (define (format-constraint-hint field value constraint)
