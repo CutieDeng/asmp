@@ -112,11 +112,11 @@
   (step "Compiling (gcc -march=armv8-a+sve)...")
   (run/check "gcc -march=armv8-a+sve -c avl.s -o avl.o")
   (when do-test?
-    (run/check "gcc -O2 -Wall -march=armv8-a+sve -DTEST_SVE -c test_correctness.exe.c -o test_correctness.exe.o")
-    (run/check "gcc test_correctness.exe.o avl.o -o test_correctness.exe"))
+    (run/check "gcc -O2 -Wall -march=armv8-a+sve -DTEST_SVE -c test_correctness.c -o test_correctness.o")
+    (run/check "gcc test_correctness.o avl.o -o test_correctness.exe"))
   (when do-bench?
-    (run/check "gcc -O2 -Wall -march=armv8-a+sve -c bench_avl.exe.c -o bench_avl.exe.o")
-    (run/check "gcc bench_avl.exe.o avl.o -o bench_avl.exe"))
+    (run/check "gcc -O2 -Wall -march=armv8-a+sve -c bench_avl.c -o bench_avl.o")
+    (run/check "gcc bench_avl.o avl.o -o bench_avl.exe"))
   (printf "    OK\n"))
 
 (define (stage-test!)

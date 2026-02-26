@@ -36,13 +36,13 @@ echo ">>> Compiling..."
 gcc -march=armv8-a+sve -c avl.s -o avl.o
 
 if [ "$MODE" = "test" ] || [ "$MODE" = "all" ]; then
-    gcc -O2 -Wall -march=armv8-a+sve -DTEST_SVE -c test_correctness.exe.c -o test_correctness.exe.o
-    gcc test_correctness.exe.o avl.o -o test_correctness.exe
+    gcc -O2 -Wall -march=armv8-a+sve -DTEST_SVE -c test_correctness.c -o test_correctness.o
+    gcc test_correctness.o avl.o -o test_correctness.exe
 fi
 
 if [ "$MODE" = "bench" ] || [ "$MODE" = "all" ]; then
-    gcc -O2 -Wall -march=armv8-a+sve -c bench_avl.exe.c -o bench_avl.exe.o
-    gcc bench_avl.exe.o avl.o -o bench_avl.exe
+    gcc -O2 -Wall -march=armv8-a+sve -c bench_avl.c -o bench_avl.o
+    gcc bench_avl.o avl.o -o bench_avl.exe
 fi
 
 echo "    OK"
