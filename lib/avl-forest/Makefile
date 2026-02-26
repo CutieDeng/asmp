@@ -6,7 +6,7 @@ HERE = lib/avl-forest
 
 .PHONY: all test test-sve clean
 
-all: test_avl
+all: test_avl.exe
 
 avl-forest.s: avl-forest.d
 	$(AS) --apple -o $(HERE)/$@ $(HERE)/$<
@@ -17,11 +17,11 @@ avl-forest.o: avl-forest.s
 test_avl.o: test_avl.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test_avl: test_avl.o avl-forest.o
+test_avl.exe: test_avl.o avl-forest.o
 	$(CC) $^ -o $@
 
-test: test_avl
-	./test_avl
+test: test_avl.exe
+	./test_avl.exe
 
 # --- SVE targets (require Docker + QEMU) ---
 
@@ -48,9 +48,9 @@ test-sve: avl-forest-gnu-fixed.s test_avl.c
 	    apt-get update -qq && apt-get install -y -qq gcc qemu-user >/dev/null 2>&1 && \
 	    gcc -O2 -Wall -DTEST_SVE -march=armv8-a+sve -c test_avl.c -o test_avl_sve.o && \
 	    gcc -march=armv8-a+sve -c avl-forest-gnu-fixed.s -o avl-forest-sve.o && \
-	    gcc test_avl_sve.o avl-forest-sve.o -o test_avl_sve -static && \
-	    qemu-aarch64 -cpu max ./test_avl_sve \
+	    gcc test_avl_sve.o avl-forest-sve.o -o test_avl_sve.exe -static && \
+	    qemu-aarch64 -cpu max ./test_avl_sve.exe \
 	  '
 
 clean:
-	rm -f *.o *.s test_avl test_avl_sve avl-forest-combined.d
+	rm -f *.o *.s *.exe avl-forest-combined.d
