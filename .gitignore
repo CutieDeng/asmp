@@ -3,3 +3,6 @@ compiled/
 *.s
 *.o
 *.exe
+
+*.txt
+*.datum

@@ -74,15 +74,17 @@
 
 (define (stage-assemble!)
   (step "Assembling (racket → GNU asm)...")
-  ;; 合并 scalar + SVE 源文件
+  ;; 合并 scalar + SVE + batch 源文件
   (define avl-d    (build-path root-dir "lib" "avl-forest" "avl-forest.d"))
   (define sve-d    (build-path root-dir "lib" "avl-forest" "avl-forest-sve.d"))
+  (define batch-d  (build-path root-dir "lib" "avl-batch" "avl-batch.d"))
   (define combined (build-path native-dir "avl-combined.d"))
 
   (call-with-output-file combined #:exists 'replace
     (lambda (out)
-      (call-with-input-file avl-d (lambda (in) (copy-port in out)))
-      (call-with-input-file sve-d (lambda (in) (copy-port in out)))))
+      (call-with-input-file avl-d   (lambda (in) (copy-port in out)))
+      (call-with-input-file sve-d   (lambda (in) (copy-port in out)))
+      (call-with-input-file batch-d (lambda (in) (copy-port in out)))))
 
   ;; 调用汇编器
   (define as-cmd

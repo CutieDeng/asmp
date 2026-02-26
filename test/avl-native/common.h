@@ -31,6 +31,25 @@ typedef struct {
     uint32_t next_hint;
 } Pool;
 
+// BatchCtx layout (must match avl-batch.d exactly)
+//   offset  0: pool_ptr   (ptr)
+//   offset  8: root       (i32)
+//   offset 12: count      (u32)
+//   offset 16: capacity   (u32)
+//   offset 20: _pad       (4B)
+//   offset 24: _pad2      (8B)
+//   offset 32: buf[32]    (i64x32, 256B)
+// total 288 bytes, 16-byte aligned
+typedef struct {
+    Pool    *pool_ptr;
+    int32_t  root;
+    uint32_t count;
+    uint32_t capacity;
+    uint32_t _pad;
+    uint64_t _pad2;
+    int64_t  buf[32];
+} BatchCtx __attribute__((aligned(16)));
+
 // --- High-precision timing (Linux) ---
 
 static inline uint64_t now_ns(void) {

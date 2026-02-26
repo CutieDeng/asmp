@@ -10,7 +10,7 @@ all: test bench
 
 # --- Assemble AVL forest (combined scalar + SVE) ---
 
-avl-combined.d: $(ROOT)/lib/avl-forest/avl-forest.d $(ROOT)/lib/avl-forest/avl-forest-sve.d
+avl-combined.d: $(ROOT)/lib/avl-forest/avl-forest.d $(ROOT)/lib/avl-forest/avl-forest-sve.d $(ROOT)/lib/avl-batch/avl-batch.d
 	cat $^ > $@
 
 avl-gnu.s: avl-combined.d

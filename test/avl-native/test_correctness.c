@@ -13,6 +13,10 @@ extern int32_t avl_delete_single(Pool *pool, int32_t root, int64_t key);
 extern int64_t  sve_lane_count(void);
 extern int32_t  avl_search_parallel(Pool *pool, int64_t key);
 extern void     avl_insert_parallel(Pool *pool, int64_t key);
+extern void     avl_batch_init(BatchCtx *ctx, Pool *pool, int32_t root);
+extern void     avl_batch_put(BatchCtx *ctx, int64_t key);
+extern void     avl_batch_flush(BatchCtx *ctx);
+extern int32_t  avl_batch_root(BatchCtx *ctx);
 #endif
 
 // --- Test infrastructure ---
@@ -415,6 +419,195 @@ static void test_mixed_parallel(void) {
     TEST_PASS();
 }
 
+// --- Batch tests ---
+
+static void test_batch_basic(void) {
+    TEST_BEGIN("batch insert 1..100");
+    Pool *pool = pool_create(1000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    for (int i = 1; i <= 100; i++)
+        avl_batch_put(&ctx, (int64_t)i);
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    for (int i = 1; i <= 100; i++)
+        ASSERT_T(avl_search_single(pool, root, (int64_t)i) != -1, "key not found");
+    ASSERT_T(avl_search_single(pool, root, 0) == -1, "false positive lo");
+    ASSERT_T(avl_search_single(pool, root, 101) == -1, "false positive hi");
+    ASSERT_T(verify_bst(pool, root, INT64_MIN, INT64_MAX), "BST violated");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    ASSERT_T(tree_size(pool, root) == 100, "size mismatch");
+    int h = tree_height(pool, root);
+    printf("h=%d ", h);
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_reverse(void) {
+    TEST_BEGIN("batch insert 100..1 (reverse)");
+    Pool *pool = pool_create(1000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    for (int i = 100; i >= 1; i--)
+        avl_batch_put(&ctx, (int64_t)i);
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    for (int i = 1; i <= 100; i++)
+        ASSERT_T(avl_search_single(pool, root, (int64_t)i) != -1, "key not found");
+    ASSERT_T(verify_bst(pool, root, INT64_MIN, INT64_MAX), "BST violated");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    int h = tree_height(pool, root);
+    printf("h=%d ", h);
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_random_1000(void) {
+    TEST_BEGIN("batch insert 1000 random keys");
+    Pool *pool = pool_create(10000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    int64_t keys[1000];
+    for (int i = 0; i < 1000; i++) keys[i] = (int64_t)(i + 1);
+    xorshift_seed(777);
+    shuffle_i64(keys, 1000);
+    for (int i = 0; i < 1000; i++)
+        avl_batch_put(&ctx, keys[i]);
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    for (int i = 1; i <= 1000; i++)
+        ASSERT_T(avl_search_single(pool, root, (int64_t)i) != -1, "key not found");
+    ASSERT_T(verify_bst(pool, root, INT64_MIN, INT64_MAX), "BST violated");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    ASSERT_T(tree_size(pool, root) == 1000, "size mismatch");
+    int h = tree_height(pool, root);
+    printf("h=%d ", h);
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_dup_within(void) {
+    TEST_BEGIN("batch dup within same flush");
+    Pool *pool = pool_create(1000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    // Insert keys with duplicates in same batch
+    avl_batch_put(&ctx, 10);
+    avl_batch_put(&ctx, 20);
+    avl_batch_put(&ctx, 10);  // dup
+    avl_batch_put(&ctx, 30);
+    avl_batch_put(&ctx, 20);  // dup
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    ASSERT_T(tree_size(pool, root) == 3, "should have 3 unique keys");
+    ASSERT_T(avl_search_single(pool, root, 10) != -1, "10 not found");
+    ASSERT_T(avl_search_single(pool, root, 20) != -1, "20 not found");
+    ASSERT_T(avl_search_single(pool, root, 30) != -1, "30 not found");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_dup_across(void) {
+    TEST_BEGIN("batch dup across flushes");
+    Pool *pool = pool_create(1000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    // First flush
+    for (int i = 1; i <= 50; i++)
+        avl_batch_put(&ctx, (int64_t)i);
+    avl_batch_flush(&ctx);
+    // Second flush with overlap
+    for (int i = 40; i <= 80; i++)
+        avl_batch_put(&ctx, (int64_t)i);
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    ASSERT_T(tree_size(pool, root) == 80, "should have 80 unique keys");
+    for (int i = 1; i <= 80; i++)
+        ASSERT_T(avl_search_single(pool, root, (int64_t)i) != -1, "key not found");
+    ASSERT_T(verify_bst(pool, root, INT64_MIN, INT64_MAX), "BST violated");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_empty_flush(void) {
+    TEST_BEGIN("batch empty flush");
+    Pool *pool = pool_create(100, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    // Flush with nothing buffered — should not crash
+    avl_batch_flush(&ctx);
+    ASSERT_T(avl_batch_root(&ctx) == -1, "root should be -1");
+    // Insert one key, flush, then empty flush again
+    avl_batch_put(&ctx, 42);
+    avl_batch_flush(&ctx);
+    avl_batch_flush(&ctx);  // empty
+    ASSERT_T(avl_batch_root(&ctx) != -1, "root should exist");
+    ASSERT_T(tree_size(pool, avl_batch_root(&ctx)) == 1, "size mismatch");
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_partial(void) {
+    TEST_BEGIN("batch partial (manual flush)");
+    Pool *pool = pool_create(1000, 1);
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool, -1);
+    // Insert fewer keys than capacity, then manual flush
+    for (int i = 1; i <= 5; i++)
+        avl_batch_put(&ctx, (int64_t)i);
+    avl_batch_flush(&ctx);
+    int32_t root = avl_batch_root(&ctx);
+    ASSERT_T(tree_size(pool, root) == 5, "size mismatch");
+    for (int i = 1; i <= 5; i++)
+        ASSERT_T(avl_search_single(pool, root, (int64_t)i) != -1, "key not found");
+    ASSERT_T(verify_avl(pool, root), "AVL violated");
+    pool_destroy(pool);
+    TEST_PASS();
+}
+
+static void test_batch_large_10000(void) {
+    TEST_BEGIN("batch large 10000 keys");
+    Pool *pool_batch = pool_create(20000, 1);
+    Pool *pool_scalar = pool_create(20000, 1);
+    int N = 10000;
+    int64_t *keys = (int64_t *)malloc((size_t)N * sizeof(int64_t));
+    for (int i = 0; i < N; i++) keys[i] = (int64_t)(i + 1);
+    xorshift_seed(54321);
+    shuffle_i64(keys, N);
+
+    // Batch insert
+    BatchCtx ctx;
+    avl_batch_init(&ctx, pool_batch, -1);
+    for (int i = 0; i < N; i++)
+        avl_batch_put(&ctx, keys[i]);
+    avl_batch_flush(&ctx);
+    int32_t root_batch = avl_batch_root(&ctx);
+
+    // Scalar reference
+    int32_t root_scalar = -1;
+    for (int i = 0; i < N; i++)
+        root_scalar = avl_insert_single(pool_scalar, root_scalar, keys[i]);
+
+    // Verify batch results
+    ASSERT_T(tree_size(pool_batch, root_batch) == N, "batch size mismatch");
+    ASSERT_T(tree_size(pool_scalar, root_scalar) == N, "scalar size mismatch");
+    for (int i = 1; i <= N; i++) {
+        ASSERT_T(avl_search_single(pool_batch, root_batch, (int64_t)i) != -1, "batch key not found");
+    }
+    ASSERT_T(verify_bst(pool_batch, root_batch, INT64_MIN, INT64_MAX), "batch BST violated");
+    ASSERT_T(verify_avl(pool_batch, root_batch), "batch AVL violated");
+    int hb = tree_height(pool_batch, root_batch);
+    int hs = tree_height(pool_scalar, root_scalar);
+    printf("h_batch=%d h_scalar=%d ", hb, hs);
+
+    free(keys);
+    pool_destroy(pool_batch);
+    pool_destroy(pool_scalar);
+    TEST_PASS();
+}
+
 #endif // TEST_SVE
 
 // ============================================================
@@ -449,6 +642,16 @@ int main(void) {
     test_search_parallel_miss();
     test_insert_parallel();
     test_mixed_parallel();
+
+    printf("\n--- SVE Batch ---\n");
+    test_batch_basic();
+    test_batch_reverse();
+    test_batch_random_1000();
+    test_batch_dup_within();
+    test_batch_dup_across();
+    test_batch_empty_flush();
+    test_batch_partial();
+    test_batch_large_10000();
 #endif
 
     printf("\n------------------------------------------------------------\n");

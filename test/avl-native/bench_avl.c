@@ -12,6 +12,11 @@ extern int64_t  sve_lane_count(void);
 extern int32_t  avl_search_parallel(Pool *pool, int64_t key);
 extern void     avl_insert_parallel(Pool *pool, int64_t key);
 
+extern void     avl_batch_init(BatchCtx *ctx, Pool *pool, int32_t root);
+extern void     avl_batch_put(BatchCtx *ctx, int64_t key);
+extern void     avl_batch_flush(BatchCtx *ctx);
+extern int32_t  avl_batch_root(BatchCtx *ctx);
+
 // --- Benchmark configuration ---
 
 #define WARMUP_ROUNDS 1
@@ -22,18 +27,19 @@ static int SIZES[] = { 1000, 10000, 100000, 500000 };
 
 // --- Result storage ---
 
-// 3 benchmarks (insert / search / mixed) x N_SIZES x 3 impls
+// 3 benchmarks (insert / search / mixed) x N_SIZES x 4 impls
 typedef struct {
     double c;
-    double asm_s;    // asm-scalar
-    double sve;
-} Triple;
+    double asm_s;       // asm-scalar
+    double sve;         // asm-sve (multi-tree)
+    double sve_batch;   // asm-sve-batch (single-tree)
+} Quad;
 
 typedef struct {
-    int    n;
-    Triple insert;
-    Triple search;
-    Triple mixed;
+    int  n;
+    Quad insert;
+    Quad search;
+    Quad mixed;
 } SizeResult;
 
 static SizeResult results[4]; // max N_SIZES = 4
@@ -199,6 +205,70 @@ static double bench_sve_mixed(int n, int64_t *keys, int n_trees, int rounds) {
     return median_d(times + WARMUP_ROUNDS, rounds);
 }
 
+// --- SVE-Batch benchmarks ---
+
+static double bench_batch_insert(int n, int64_t *keys, int rounds) {
+    double times[BENCH_ROUNDS + WARMUP_ROUNDS];
+    for (int r = 0; r < WARMUP_ROUNDS + rounds; r++) {
+        Pool *pool = pool_create((uint32_t)(n + 100), 1);
+        BatchCtx ctx;
+        avl_batch_init(&ctx, pool, -1);
+        uint64_t t0 = now_ns();
+        for (int i = 0; i < n; i++)
+            avl_batch_put(&ctx, keys[i]);
+        avl_batch_flush(&ctx);
+        uint64_t t1 = now_ns();
+        times[r] = (double)(t1 - t0) / (double)n;
+        pool_destroy(pool);
+    }
+    return median_d(times + WARMUP_ROUNDS, rounds);
+}
+
+static double bench_batch_search(int n, int64_t *keys, int64_t *search_keys, int rounds) {
+    // Batch insert, then scalar search (batch is insert-only optimization)
+    double times[BENCH_ROUNDS + WARMUP_ROUNDS];
+    for (int r = 0; r < WARMUP_ROUNDS + rounds; r++) {
+        Pool *pool = pool_create((uint32_t)(n + 100), 1);
+        BatchCtx ctx;
+        avl_batch_init(&ctx, pool, -1);
+        for (int i = 0; i < n; i++)
+            avl_batch_put(&ctx, keys[i]);
+        avl_batch_flush(&ctx);
+        int32_t root = avl_batch_root(&ctx);
+        uint64_t t0 = now_ns();
+        for (int i = 0; i < n; i++)
+            avl_search_single(pool, root, search_keys[i]);
+        uint64_t t1 = now_ns();
+        times[r] = (double)(t1 - t0) / (double)n;
+        pool_destroy(pool);
+    }
+    return median_d(times + WARMUP_ROUNDS, rounds);
+}
+
+static double bench_batch_mixed(int n, int64_t *keys, int rounds) {
+    double times[BENCH_ROUNDS + WARMUP_ROUNDS];
+    for (int r = 0; r < WARMUP_ROUNDS + rounds; r++) {
+        Pool *pool = pool_create((uint32_t)(n + 100), 1);
+        BatchCtx ctx;
+        avl_batch_init(&ctx, pool, -1);
+        int half = n / 2;
+        for (int i = 0; i < half; i++)
+            avl_batch_put(&ctx, keys[i]);
+        avl_batch_flush(&ctx);
+        uint64_t t0 = now_ns();
+        for (int i = half; i < n; i++) {
+            avl_batch_put(&ctx, keys[i]);
+            avl_batch_flush(&ctx);
+            avl_search_single(pool, avl_batch_root(&ctx), keys[i - half]);
+        }
+        uint64_t t1 = now_ns();
+        int ops = (n - half) * 2;
+        times[r] = (double)(t1 - t0) / (double)ops;
+        pool_destroy(pool);
+    }
+    return median_d(times + WARMUP_ROUNDS, rounds);
+}
+
 // ============================================================
 //  Output: Racket datum format
 // ============================================================
@@ -223,12 +293,12 @@ static void emit_datum(FILE *f, int64_t lanes, const char *hostname,
     for (int b = 0; b < 3; b++) {
         fprintf(f, " (%s\n", bench_names[b]);
         for (int si = 0; si < N_SIZES; si++) {
-            Triple *t;
+            Quad *t;
             if      (b == 0) t = &results[si].insert;
             else if (b == 1) t = &results[si].search;
             else             t = &results[si].mixed;
-            fprintf(f, "  ((n . %d) (c-scalar . %.2f) (asm-scalar . %.2f) (asm-sve . %.2f))\n",
-                    results[si].n, t->c, t->asm_s, t->sve);
+            fprintf(f, "  ((n . %d) (c-scalar . %.2f) (asm-scalar . %.2f) (asm-sve . %.2f) (sve-batch . %.2f))\n",
+                    results[si].n, t->c, t->asm_s, t->sve, t->sve_batch);
         }
         fprintf(f, " )\n\n");
     }
@@ -245,6 +315,9 @@ static void emit_datum(FILE *f, int64_t lanes, const char *hostname,
     fprintf(f, "  (asm-sve-vs-c-scalar\n");
     fprintf(f, "   (insert-speedup . %.3f)\n",  last->insert.c / last->insert.sve);
     fprintf(f, "   (search-speedup . %.3f))\n",  last->search.c / last->search.sve);
+    fprintf(f, "  (sve-batch-vs-asm-scalar\n");
+    fprintf(f, "   (insert-speedup . %.3f)\n",  last->insert.asm_s / last->insert.sve_batch);
+    fprintf(f, "   (search-speedup . %.3f))\n",  last->search.asm_s / last->search.sve_batch);
 
     // peak throughput
     double best_tp = 0;
@@ -263,16 +336,17 @@ static void emit_datum(FILE *f, int64_t lanes, const char *hostname,
 
 static void emit_text_table(FILE *f, const char *title, int bench_idx) {
     fprintf(f, "\n--- %s ---\n", title);
-    fprintf(f, "    %-6s|  %-12s|  %-12s|  %-12s| %-s\n",
-            "N", "C-scalar", "ASM-scalar", "ASM-SVE", "SVE speedup");
-    fprintf(f, "----------+--------------+--------------+--------------+----------\n");
+    fprintf(f, "    %-6s|  %-12s|  %-12s|  %-12s|  %-12s| %-s\n",
+            "N", "C-scalar", "ASM-scalar", "ASM-SVE", "SVE-Batch", "Batch speedup");
+    fprintf(f, "----------+--------------+--------------+--------------+--------------+----------\n");
     for (int si = 0; si < N_SIZES; si++) {
-        Triple *t;
+        Quad *t;
         if      (bench_idx == 0) t = &results[si].insert;
         else if (bench_idx == 1) t = &results[si].search;
         else                     t = &results[si].mixed;
-        fprintf(f, " %8d | %9.1f ns | %9.1f ns | %9.1f ns |   %5.2fx\n",
-                results[si].n, t->c, t->asm_s, t->sve, t->asm_s / t->sve);
+        fprintf(f, " %8d | %9.1f ns | %9.1f ns | %9.1f ns | %9.1f ns |   %5.2fx\n",
+                results[si].n, t->c, t->asm_s, t->sve, t->sve_batch,
+                t->asm_s / t->sve_batch);
     }
 }
 
@@ -286,7 +360,7 @@ static void emit_text(FILE *f, int64_t lanes, const char *hostname,
     fprintf(f, "  Timestamp : %s\n", timestamp);
     fprintf(f, "  SVE lanes : %lld (%lld-bit)\n",
             (long long)lanes, (long long)(lanes * 64));
-    fprintf(f, "  Impls     : C-scalar, ASM-scalar, ASM-SVE(%lld trees)\n",
+    fprintf(f, "  Impls     : C-scalar, ASM-scalar, ASM-SVE(%lld trees), SVE-Batch(1 tree)\n",
             (long long)lanes);
     fprintf(f, "  Method    : %d warmup + %d measured rounds, median ns/op\n",
             WARMUP_ROUNDS, BENCH_ROUNDS);
@@ -306,6 +380,9 @@ static void emit_text(FILE *f, int64_t lanes, const char *hostname,
     fprintf(f, "ASM-SVE    vs C-scalar  : %5.2fx faster (insert), %5.2fx faster (search)\n",
             last->insert.c / last->insert.sve,
             last->search.c / last->search.sve);
+    fprintf(f, "SVE-Batch  vs ASM-scalar: %5.2fx faster (insert), %5.2fx faster (search)\n",
+            last->insert.asm_s / last->insert.sve_batch,
+            last->search.asm_s / last->search.sve_batch);
 
     double best_tp = 0;
     for (int si = 0; si < N_SIZES; si++) {
@@ -356,25 +433,28 @@ int main(int argc, char **argv) {
         // Insert
         fprintf(stderr, "  [%d/%d] N=%-8d insert... ", si + 1, N_SIZES, n);
         fflush(stderr);
-        results[si].insert.c     = bench_c_insert(n, keys, BENCH_ROUNDS);
-        results[si].insert.asm_s = bench_asm_insert(n, keys, BENCH_ROUNDS);
-        results[si].insert.sve   = bench_sve_insert(n, keys, (int)lanes, BENCH_ROUNDS);
+        results[si].insert.c         = bench_c_insert(n, keys, BENCH_ROUNDS);
+        results[si].insert.asm_s     = bench_asm_insert(n, keys, BENCH_ROUNDS);
+        results[si].insert.sve       = bench_sve_insert(n, keys, (int)lanes, BENCH_ROUNDS);
+        results[si].insert.sve_batch = bench_batch_insert(n, keys, BENCH_ROUNDS);
         fprintf(stderr, "search... ");
         fflush(stderr);
 
         // Search
-        results[si].search.c     = bench_c_search(n, keys, search, BENCH_ROUNDS);
-        results[si].search.asm_s = bench_asm_search(n, keys, search, BENCH_ROUNDS);
-        results[si].search.sve   = bench_sve_search(n, keys, search, (int)lanes, BENCH_ROUNDS);
+        results[si].search.c         = bench_c_search(n, keys, search, BENCH_ROUNDS);
+        results[si].search.asm_s     = bench_asm_search(n, keys, search, BENCH_ROUNDS);
+        results[si].search.sve       = bench_sve_search(n, keys, search, (int)lanes, BENCH_ROUNDS);
+        results[si].search.sve_batch = bench_batch_search(n, keys, search, BENCH_ROUNDS);
         fprintf(stderr, "mixed... ");
         fflush(stderr);
 
         // Mixed (shuffle keys for mixed workload)
         xorshift_seed(99 + (uint64_t)n);
         shuffle_i64(keys, n);
-        results[si].mixed.c     = bench_c_mixed(n, keys, BENCH_ROUNDS);
-        results[si].mixed.asm_s = bench_asm_mixed(n, keys, BENCH_ROUNDS);
-        results[si].mixed.sve   = bench_sve_mixed(n, keys, (int)lanes, BENCH_ROUNDS);
+        results[si].mixed.c         = bench_c_mixed(n, keys, BENCH_ROUNDS);
+        results[si].mixed.asm_s     = bench_asm_mixed(n, keys, BENCH_ROUNDS);
+        results[si].mixed.sve       = bench_sve_mixed(n, keys, (int)lanes, BENCH_ROUNDS);
+        results[si].mixed.sve_batch = bench_batch_mixed(n, keys, BENCH_ROUNDS);
         fprintf(stderr, "done\n");
 
         free(keys);
