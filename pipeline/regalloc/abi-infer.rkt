@@ -39,7 +39,8 @@
   verify-declared-abi
 
   ;; 查询
-  get-function-abi-info)
+  get-function-abi-info
+  function-is-leaf?)
 
 ;; ============================================================
 ;; 数据结构
@@ -677,6 +678,14 @@
 ;; 查询函数的 ABI 信息
 (define (get-function-abi-info abi-info-map fn-name)
   (hash-ref abi-info-map fn-name #f))
+
+;; 判断函数是否为叶子函数（无任何 bl/blr 调用）
+;; 通过检查函数体是否包含 bl/blr 指令来判断
+(define (function-is-leaf? fn)
+  (for*/and ([kv (in-ordered-map (asm-function-blocks fn))]
+             [ins (in-pvector (basic-block-instructions (cdr kv)))]
+             #:when (ast-ins? ins))
+    (not (memq (ast-ins-mnemonic ins) '(bl blr)))))
 
 ;; ============================================================
 ;; 测试

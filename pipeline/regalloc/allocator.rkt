@@ -26,7 +26,8 @@
   merge-alloc-results
   format-alloc-result
   format-multi-alloc-result
-  *trace-allocator*)          ; 性能追踪开关
+  *trace-allocator*          ; 性能追踪开关
+  *spill-cost-map*)          ; 溢出代价映射参数
 
 ;; ============================================================
 ;; 数据结构
@@ -58,6 +59,11 @@
 
 ;; 性能追踪参数
 (define *trace-allocator* (make-parameter #f))
+
+;; 溢出代价映射：ordered-map[reg-id -> number]
+;; 值越大表示溢出代价越高（应优先保留在寄存器中）
+;; 如果为 #f，使用纯度数策略（原始行为）
+(define *spill-cost-map* (make-parameter #f))
 
 ;; 分配单类干涉图
 (define (allocate-registers ig #:abi [abi arm64-abi])
@@ -414,16 +420,24 @@
 
 (define (select-spill state)
   (define worklist (allocator-state-spill-worklist state))
+  (define cost-map (*spill-cost-map*))
   (define best-idx -1)
-  (define best-score -1)
+  (define best-priority -inf.0)
 
-  ;; 直接用索引，避免 reg->idx 的查找
+  ;; 选择 spill priority 最高的变量溢出
+  ;; priority = degree / cost
+  ;; 度数高但使用代价低 = 便宜的溢出候选
   (for ([i (in-bitset worklist)])
     (define reg (pvector-ref (allocator-state-index-reg state) i))
     (define degree (ordered-map-ref (allocator-state-degree state) reg 0))
-    (when (> degree best-score)
+    (define priority
+      (if cost-map
+          (let ([cost (ordered-map-ref cost-map reg 1)])
+            (/ (exact->inexact degree) (max 1 cost)))
+          (exact->inexact degree)))
+    (when (> priority best-priority)
       (set! best-idx i)
-      (set! best-score degree)))
+      (set! best-priority priority)))
 
   (define best-reg (pvector-ref (allocator-state-index-reg state) best-idx))
   (define st1 (struct-copy allocator-state state

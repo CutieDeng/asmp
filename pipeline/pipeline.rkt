@@ -12,9 +12,13 @@
          "regalloc/abi.rkt"
          "regalloc/spill-config.rkt"
          "regalloc/save-load.rkt"
+         "regalloc/loop-analysis.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/use-def.rkt"
          "../semantic/validate.rkt"
-         "../vendor/cutie-ftree/pvector.rkt")
+         "../parser/ast.rkt"
+         "../vendor/cutie-ftree/pvector.rkt"
+         "../vendor/cutie-ftree/ordered-map.rkt")
 
 (provide
   ;; 主流水线
@@ -41,7 +45,8 @@
   (all-from-out "regalloc/rewriter.rkt")
   (all-from-out "regalloc/abi.rkt")
   (all-from-out "regalloc/spill-config.rkt")
-  (all-from-out "regalloc/save-load.rkt"))
+  (all-from-out "regalloc/save-load.rkt")
+  (all-from-out "regalloc/loop-analysis.rkt"))
 
 ;; ============================================================
 ;; 配置
@@ -129,7 +134,11 @@
     ;; 3. 图着色分配（各类独立分配）
     ;; 使用 effective-abi（考虑 save! 声明）
     (define effective-abi (multi-class-ig-effective-abi mig))
-    (define multi-result (allocate-all-registers mig #:abi effective-abi))
+    ;; 计算循环感知溢出代价
+    (define cost-map (compute-spill-cost-map current-fn))
+    (define multi-result
+      (parameterize ([*spill-cost-map* cost-map])
+        (allocate-all-registers mig #:abi effective-abi)))
     (define alloc-result (merge-alloc-results multi-result))
     (define spilled (alloc-result-spilled alloc-result))
 
@@ -195,6 +204,39 @@
        (pipeline-result final-fn liveness mig alloc-result multi-result
                         spill-slots frame-size iter
                         all-errors)])))
+
+;; ============================================================
+;; 循环感知溢出代价计算
+;; ============================================================
+
+;; 计算每个寄存器变量的溢出代价
+;; cost(v) = Σ (每个 use/def 点所在 block 的 10^loop_depth)
+;; 返回 ordered-map[reg-id -> number]
+(define (compute-spill-cost-map fn)
+  (define depths (compute-loop-depths fn))
+  (define cost-map (make-hash))
+
+  (for ([kv (in-ordered-map (asm-function-blocks fn))])
+    (define bb-id-val (car kv))
+    (define block (cdr kv))
+    (define depth (get-loop-depth depths bb-id-val))
+    (define weight (expt 10 depth))
+
+    (for ([ins (in-pvector (basic-block-instructions block))])
+      (when (ast-ins? ins)
+        (define use-def (extract-use-def ins))
+        ;; 为每个 def 和 use 的寄存器累加代价
+        (for ([ref (in-list (append (use-def-flat-defs use-def)
+                                    (use-def-flat-uses use-def)))])
+          (define rid (reg-ref->reg-id ref))
+          (when (reg-id-virtual? rid)
+            (hash-set! cost-map rid
+                       (+ (hash-ref cost-map rid 0) weight)))))))
+
+  ;; 转换为 ordered-map
+  (for/fold ([m (ordered-map-empty reg-id-compare)])
+            ([(rid cost) (in-hash cost-map)])
+    (ordered-map-set m rid cost)))
 
 ;; 从 simple-graph 模块获取顶点数
 (require "../vendor/cutie-ftree/simple-graph.rkt")

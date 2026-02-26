@@ -33,6 +33,7 @@
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
          "../pipeline/regalloc/abi-infer.rkt"
+         "../pipeline/analysis/perf-report.rkt"
          "../codegen/emit.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
@@ -74,6 +75,9 @@
 ;; 错误处理
 (define continue-on-error (make-parameter #f))
 (define show-hints (make-parameter #t))
+
+;; 性能报告
+(define perf-report (make-parameter #f))
 
 ;; 功能开关
 (define skip-validation (make-parameter #f))
@@ -405,16 +409,29 @@
 
 (struct regalloc-stage-result
   (results        ; (listof pipeline-result)
-   errors)        ; pvector of string
+   errors         ; pvector of string
+   functions      ; (listof asm-function) — inline 展开后的函数
+   abi-info-map)  ; hash[fn-name -> function-abi-info]
   #:transparent)
 
 ;; 解析函数的 ABI 名称 → abi-config
 ;; 优先使用函数属性 (abi <name>)，其次 --default-abi 参数
-(define (resolve-function-abi fn)
+;; 当 --default-abi 为 auto 时，根据 abi-info-map 自动推断：
+;;   无调用 → leaf，有调用 → aapcs64
+(define (resolve-function-abi fn [abi-info-map #f])
   (define fn-name (asm-function-name fn))
+  (define explicit-abi (fn-get-info fn 'abi #f))
   (define abi-name
-    (or (fn-get-info fn 'abi #f)
-        (default-abi-name)))
+    (cond
+      ;; 函数显式声明了 ABI → 直接使用
+      [explicit-abi explicit-abi]
+      ;; --default-abi auto → 自动推断
+      [(eq? (default-abi-name) 'auto)
+       (if (function-is-leaf? fn)
+           'leaf      ; 无 bl/blr → leaf ABI
+           'aapcs64)] ; 有调用 → aapcs64
+      ;; 其他 --default-abi 值
+      [else (default-abi-name)]))
   (cond
     [(not abi-name) #f]
     [else
@@ -453,7 +470,7 @@
 
   (define results
     (for/list ([fn (in-list functions*)])
-      (define abi (or (resolve-function-abi fn) arm64-abi))
+      (define abi (or (resolve-function-abi fn abi-info-map) arm64-abi))
       (define config
         (make-pipeline-config
          #:abi abi
@@ -490,7 +507,7 @@
                (pipeline-result-iterations r)
                (pipeline-result-frame-size r))))
 
-  (regalloc-stage-result results errors))
+  (regalloc-stage-result results errors functions* abi-info-map))
 
 (define (dump-liveness-info results)
   (displayln ";; === Liveness Dump ===")
@@ -664,12 +681,23 @@
               (pipeline-result-frame-size r)))
     (exit 0))
 
+  ;; 性能报告（在代码生成之前输出）
+  (when (perf-report)
+    (define report
+      (generate-perf-report
+       (regalloc-stage-result-results regalloc-result)
+       (regalloc-stage-result-functions regalloc-result)
+       (regalloc-stage-result-abi-info-map regalloc-result)))
+    (displayln report)
+    (displayln ""))
+
   ;; 阶段 4: 代码生成
   (define emit-result
     (run-emit-stage (regalloc-stage-result-results regalloc-result)))
 
   ;; 输出
-  (write-output (emit-stage-result-assembly emit-result))
+  (unless (perf-report)
+    (write-output (emit-stage-result-assembly emit-result)))
 
   ;; 返回状态
   (if (pvector-empty? all-errors) 0 1))
@@ -793,6 +821,10 @@
      [("--pedantic")
       "启用严格检查 (警告可疑的代码模式)"
       (pedantic-flag #t)]
+
+     [("--perf-report")
+      "输出性能分析报告 (溢出、load-use 依赖链、ABI 建议)"
+      (perf-report #t)]
 
      ;; ABI 配置
      [("--default-abi") name
