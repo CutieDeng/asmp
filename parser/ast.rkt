@@ -69,6 +69,7 @@
 (define reloc-kind/c (or/c #f 'PAGE 'PAGEOFF 'GOTPAGE 'GOTPAGEOFF))
 (define directive-kind/c
   (or/c 'function 'end-function 'label 'section 'align 'global 'extern
+        'ascii 'asciz 'byte 'byte2 'byte4 'byte8 'byte16 'byte32
         'save! 'load! 'weak-mov 'inline))
 
 ;; ============================================================
@@ -90,6 +91,8 @@
 
 ;; 标签/符号 (可带 relocation 修饰符)
 ;; reloc: #f | 'PAGE | 'PAGEOFF | 'GOTPAGE | 'GOTPAGEOFF
+;;   Apple 语法: sym@PAGE / sym@PAGEOFF / sym@GOTPAGE / sym@GOTPAGEOFF
+;;   GNU 语法:   :pg_hi21:sym / :lo12:sym / :got:sym / :got_lo12:sym
 (struct ast-label (name reloc loc) #:transparent)
 
 ;; 移位 (kind + 可选的 amount)

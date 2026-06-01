@@ -192,7 +192,10 @@
               ([i (in-range n)])
       (define reg (pvector-ref index-reg i))
       (if (reg-id-physical? reg)
-          (ordered-map-set m reg (reg-id-id reg))
+          (let ([color (abi-reg->color abi (reg-id-class reg) (reg-id-id reg))])
+            (if color
+                (ordered-map-set m reg color)
+                m))
           m)))
 
   (define-values (move-list worklist-moves)

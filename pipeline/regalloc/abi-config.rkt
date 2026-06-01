@@ -305,7 +305,7 @@
 ;; 验证
 ;; ============================================================
 
-;; 验证函数是否有有效的 ABI 声明
+;; 解析函数 ABI 声明；未声明时返回内建 arm64-abi。
 ;; fn-attrs: hash 函数属性
 ;; 返回: (values abi-config error-message)
 (define (validate-function-abi fn-name fn-attrs)
@@ -317,7 +317,7 @@
 
   (cond
     [(not abi-name)
-     (values #f (format "函数 ~a 未指定 ABI，且未设置 --default-abi" fn-name))]
+     (values arm64-abi #f)]
     [else
      (define abi (get-abi-by-name abi-name))
      (if abi

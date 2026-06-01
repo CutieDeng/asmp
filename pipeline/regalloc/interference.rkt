@@ -142,26 +142,26 @@
     (if (null? gpr-regs) #f
         (build-class-ig 'gpr (reverse gpr-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        gpr-num-colors)))
+                        gpr-num-colors effective-abi)))
 
   (define fpr-ig
     (if (null? fpr-regs) #f
         (build-class-ig 'fpr (reverse fpr-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        fpr-num-colors)))
+                        fpr-num-colors effective-abi)))
 
   (define pred-ig
     (if (null? pred-regs) #f
         (build-class-ig 'predicate (reverse pred-regs) fn liveness
                         all-move-edges all-groups live-across-call
-                        pred-num-colors)))
+                        pred-num-colors effective-abi)))
 
   (multi-class-ig gpr-ig fpr-ig pred-ig effective-abi))
 
 ;; 构建单类干涉图
 (define (build-class-ig class reg-pairs fn liveness
                          all-move-edges all-groups live-across-call
-                         num-colors)
+                         num-colors abi)
   ;; 创建类内索引
   (define-values (class-reg-index class-index-reg)
     (for/fold ([r->i (ordered-map-empty reg-id-compare)]
@@ -194,9 +194,11 @@
                [idx (in-naturals)])
       (define reg (cdr pair))
       (if (reg-id-physical? reg)
-          (let ([color (reg-id-id reg)])
+          (let ([color (abi-reg->color abi (reg-id-class reg) (reg-id-id reg))])
             (values (bitset-add pre idx)
-                    (ordered-map-set col idx color)))
+                    (if color
+                        (ordered-map-set col idx color)
+                        col)))
           (values pre col))))
 
   ;; 过滤本类的 move 边

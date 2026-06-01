@@ -13,7 +13,8 @@
 ;;
 ;; 数据来源: semantic/data/branch-patterns.rktd
 
-(require "../parser/ast.rkt")
+(require "../parser/ast.rkt"
+         racket/runtime-path)
 
 (provide
   ;; 数据结构
@@ -60,7 +61,7 @@
 ;; 分支模式数据库 (从 .rktd 文件加载)
 ;; ============================================================
 
-(define patterns-path "semantic/data/branch-patterns.rktd")
+(define-runtime-path patterns-path "data/branch-patterns.rktd")
 
 ;; 内存缓存
 (define *branch-db* (box #f))

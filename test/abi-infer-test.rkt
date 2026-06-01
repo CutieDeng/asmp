@@ -106,6 +106,41 @@
     ;; callee-saved x19 不应被默认 scratch 假设覆盖
     (check-false (bitset-member? defs 19)))
 
+  (test-case "没有 default-abi 时，未知调用按内建 AAPCS64 保守推断"
+    (parameterize ([default-abi-name #f])
+      (define cfg
+        (source->cfg "
+(: extern ext)
+(: function caller)
+(: label entry)
+  (bl ext)
+  (ret)
+(: end-function)
+"))
+      (define abi-map (infer-all-abis cfg))
+      (define info (hash-ref abi-map 'caller #f))
+      (check-not-false info)
+      (define defs (inferred-abi-gpr-def (function-abi-info-inferred-abi info)))
+      (check-true (bitset-member? defs 0))
+      (check-false (bitset-member? defs 19))))
+
+  (test-case "extern ABI 声明控制外部调用 clobber 集"
+    (define cfg
+      (source->cfg "
+(: extern ext (abi naked))
+(: function caller)
+(: label entry)
+  (bl ext)
+  (ret)
+(: end-function)
+"))
+    (define abi-map (infer-all-abis cfg))
+    (define info (hash-ref abi-map 'caller #f))
+    (check-not-false info)
+    (define defs (inferred-abi-gpr-def (function-abi-info-inferred-abi info)))
+    ;; naked 没有 preserved，x19 也应按可能被 clobber 处理。
+    (check-true (bitset-member? defs 19)))
+
   (test-case "同一 CFG 重复推断时，切换 default-abi 仍应生效（缓存不应污染语义）"
     (define cfg
       (source->cfg "

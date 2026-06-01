@@ -288,6 +288,8 @@
     ["xsp" (ast-reg 'x 'sp #f #f #f #f loc)]
     ["xzr" (ast-reg 'x 'zr #f #f #f #f loc)]
     ["wzr" (ast-reg 'w 'zr #f #f #f #f loc)]
+    ["fp" (ast-reg 'x 29 #f #f #f #f loc)]
+    ["lr" (ast-reg 'x 30 #f #f #f #f loc)]
     [_ (or (parse-physical-register str loc)
            (parse-virtual-register str loc))]))
 
@@ -528,6 +530,20 @@
       [(list key) (values key #t)]  ; 无值属性视为 #t
       [_ (error 'parse-function-attrs "无效属性: ~a" attr)])))
 
+(define (parse-extern-attrs attrs)
+  (define kind 'func)
+  (define abi-name #f)
+  (for ([attr (in-list attrs)])
+    (match attr
+      [(list 'var) (set! kind 'var)]
+      [(list 'func) (set! kind 'func)]
+      [(list 'abi name)
+       (set! abi-name name)]
+      [_ (error 'parse-extern-attrs "无效 extern 属性: ~a" attr)]))
+  (filter values
+          (list kind
+                (and abi-name (list 'abi abi-name)))))
+
 ;; 解析元语法指令
 (define (parse-directive/stx stx)
   (define datum (syntax->datum stx))
@@ -548,10 +564,9 @@
      (ast-directive 'align #f (list n) loc)]
     [(list ': 'global name)
      (ast-directive 'global name '() loc)]
-    [(list ': 'extern name)
-     (ast-directive 'extern name '(func) loc)]
-    [(list ': 'extern name '(var))
-     (ast-directive 'extern name '(var) loc)]
+    [(list ': 'extern name attrs ...)
+     #:when (symbol? name)
+     (ast-directive 'extern name (parse-extern-attrs attrs) loc)]
     ;; save!/load! 指令
     ;; 语法: (: save! reg ... [size-spec])
     ;;       (: load! reg ... [size-spec])

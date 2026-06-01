@@ -12,7 +12,8 @@
 
 (require "operand-type.rkt"
          "class.rkt"
-         "constraint.rkt")
+         "constraint.rkt"
+         racket/runtime-path)
 
 (provide
   ;; 数据库加载
@@ -42,7 +43,7 @@
 ;; 路径配置
 ;; ============================================================
 
-(define data-root "syntax/data")
+(define-runtime-path data-root "data")
 (define generated-dir (build-path data-root "generated"))
 (define cached-dir (build-path data-root "cached"))
 

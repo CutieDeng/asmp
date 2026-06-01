@@ -127,6 +127,29 @@
      (ast-directive kind name (list regs* size-spec) loc)]
     [_ d]))
 
+(define (branch-target-label item)
+  (match item
+    [(ast-ins 'b #f (list (ast-label target #f _)) _)
+     target]
+    [_ #f]))
+
+(define (leading-label-names items)
+  (let loop ([rest items] [labels '()])
+    (match rest
+      [(cons (ast-directive 'label name _ _) tail)
+       (loop tail (cons name labels))]
+      [_ (reverse labels)])))
+
+(define (drop-branches-to-next-label items)
+  (let loop ([rest items])
+    (match rest
+      ['() '()]
+      [(cons item tail)
+       (define target (branch-target-label item))
+       (if (and target (member target (leading-label-names tail)))
+           (loop tail)
+           (cons item (loop tail)))])))
+
 ;; 将一次 inline 实例化并重命名
 (define (instantiate-inline caller target body inline-loc fresh-id)
   (define prefix
@@ -171,9 +194,11 @@
           [_ (list item)]))
       (append out transformed)))
 
-  ;; 统一追加出口标签，供被改写的 ret 跳转
-  (append rewritten
-          (list (ast-directive 'label exit-label '() inline-loc))))
+  ;; 统一追加出口标签，供被改写的 ret 跳转；末尾 ret 形成的
+  ;; "b next_label; next_label:" 直接删除，避免 inline 生成空跳转。
+  (drop-branches-to-next-label
+   (append rewritten
+           (list (ast-directive 'label exit-label '() inline-loc)))))
 
 ;; 展开所有 (: inline target)
 (define (expand-inline-items items)
@@ -270,14 +295,21 @@
                    (asm-function-name fn)
                    (fn-info->attr-hash fn)
                    no-srcloc))
+  (define (labels-for-block block)
+    (define bbid (basic-block-id block))
+    (sort
+     (for/list ([kv (in-ordered-map (asm-function-label->id fn))]
+                #:when (equal? (cdr kv) bbid))
+       (car kv))
+     (lambda (a b)
+       (string<? (symbol->string a) (symbol->string b)))))
   (define body
     (apply append
            (for/list ([kv (in-ordered-map (asm-function-blocks fn))])
              (define block (cdr kv))
              (append
-              (if (bb-label block)
-                  (list (ast-directive 'label (bb-label block) '() no-srcloc))
-                  '())
+              (for/list ([label (in-list (labels-for-block block))])
+                (ast-directive 'label label '() no-srcloc))
               (for/list ([ins (in-pvector (basic-block-instructions block))])
                 ins)))))
   (define footer (ast-directive 'end-function #f '() no-srcloc))

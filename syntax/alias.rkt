@@ -12,6 +12,8 @@
 ;;   cmp Xn, Xm    → subs xzr, Xn, Xm
 ;;   tst Xn, Xm    → ands xzr, Xn, Xm
 
+(require racket/runtime-path)
+
 (provide
   ;; 数据库
   get-alias-map
@@ -28,7 +30,7 @@
 ;; 别名数据库
 ;; ============================================================
 
-(define alias-map-path "syntax/data/alias-map.rktd")
+(define-runtime-path alias-map-path "data/alias-map.rktd")
 
 ;; 内存缓存
 (define *alias-map* (box #f))

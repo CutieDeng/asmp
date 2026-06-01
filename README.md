@@ -1,4 +1,4 @@
-# multiavl
+# asmp
 
 一个用 Racket 编写的 ARM64 汇编编译器框架，支持 Lisp S-expression 语法编写 ARM64 汇编代码。
 
@@ -21,7 +21,7 @@
 
 ```bash
 git clone <repository-url>
-cd multiavl
+cd asmp
 ```
 
 无需额外安装依赖，所有必要的库已包含在 `vendor/` 目录中。
@@ -41,10 +41,10 @@ raco make cli/as.rkt
 
 ```bash
 # 创建独立可执行文件
-raco exe -o multiavl-as cli/as.rkt
+raco exe -o asmp cli/as.rkt
 
 # 运行
-./multiavl-as example/001-basic.d
+./asmp example/001-basic.d
 ```
 
 ### 创建可分发包
@@ -52,8 +52,8 @@ raco exe -o multiavl-as cli/as.rkt
 生成可在无 Racket 环境的机器上运行的分发包：
 
 ```bash
-raco exe -o multiavl-as cli/as.rkt
-raco distribute dist/ multiavl-as
+raco exe -o asmp cli/as.rkt
+raco distribute dist/ asmp
 ```
 
 生成的 `dist/` 目录包含所有依赖，可直接复制到目标机器运行。
@@ -83,7 +83,7 @@ racket cli/as.rkt -v example/001-basic.d
 | `--gnu` / `--apple` | 选择汇编语法（默认 GNU） |
 | `--stop-after=PHASE` | 在指定阶段停止（parse/validate/cfg/regalloc/emit） |
 | `--dump=INFO` | 调试输出（ast/cfg/liveness/interference/allocation） |
-| `--default-abi=ABI` | 默认 ABI（aapcs64/leaf/naked） |
+| `--default-abi=ABI` | 未指定调用 ABI 时的兼容默认值（aapcs64/leaf/naked/auto） |
 | `--allow-spill` | 允许寄存器溢出 |
 | `--no-verify-save-load` | 跳过 save/load 验证 |
 
@@ -210,7 +210,7 @@ racket test/parser-test.rkt
 ## 项目结构
 
 ```
-multiavl/
+asmp/
 ├── cli/                    # 命令行工具
 │   ├── as.rkt              # 主汇编器入口
 │   ├── parse.rkt           # 解析器 CLI

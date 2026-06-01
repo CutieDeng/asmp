@@ -4,11 +4,12 @@
 ;; parser/frontend.rkt - 前端语法解析层
 ;; ============================================================
 ;;
-;; 提供从字符串和文件解析 S-expression 格式汇编指令的功能，
+;; 提供从字符串和文件解析 S-expression / GNU 风格汇编指令的功能，
 ;; 完整保留源码位置信息用于调试。
 
 (require "ast.rkt"
          "parser.rkt"
+         "gnu-parser.rkt"
          "../syntax/validator.rkt"
          racket/struct)
 
@@ -128,23 +129,36 @@
 ;; 解析多条指令
 (define (parse-string str
                       #:source [source 'string]
-                      #:validate? [validate? #f])
+                      #:validate? [validate? #f]
+                      #:syntax [syntax-mode 'sexp])
   (define in (open-input-string str))
-  (parse-port in source #:validate? validate?))
+  (parse-port in source #:validate? validate? #:syntax syntax-mode))
 
 ;; ============================================================
 ;; 文件解析
 ;; ============================================================
 
 ;; 解析文件
-(define (parse-file path #:validate? [validate? #f])
+(define (parse-file path #:validate? [validate? #f] #:syntax [syntax-mode 'sexp])
   (call-with-input-file path
     (lambda (in)
-      (parse-port in path #:validate? validate?))))
+      (parse-port in path #:validate? validate? #:syntax syntax-mode))))
 
 ;; 从端口解析
-(define (parse-port in source #:validate? [validate? #f])
+(define (parse-port in source #:validate? [validate? #f] #:syntax [syntax-mode 'sexp])
   (port-count-lines! in)
+  (case (normalize-input-syntax syntax-mode)
+    [(sexp) (parse-sexpr-port in source #:validate? validate?)]
+    [(gnu) (parse-gnu-port in source #:validate? validate?)]))
+
+(define (normalize-input-syntax syntax-mode)
+  (case syntax-mode
+    [(sexp s-expression lisp) 'sexp]
+    [(gnu gas) 'gnu]
+    [else
+     (error 'parse-port "未知输入语法: ~a (可选: sexp, gnu)" syntax-mode)]))
+
+(define (parse-sexpr-port in source #:validate? [validate? #f])
   (let loop ([acc '()])
     (with-handlers
       ([exn:fail:read?
@@ -166,6 +180,38 @@
          (define result (parse-single-stx stx validate?))
          (loop (cons result acc))]))))
 
+(define (parse-gnu-port in source #:validate? [validate? #f])
+  (let loop ([line-number 1]
+             [state (make-gnu-state)]
+             [acc '()])
+    (define line-text (read-line in 'any))
+    (cond
+      [(eof-object? line-text)
+       (define finish-items (finish-gnu-state state source line-number))
+       (define finish-results
+         (for/list ([item (in-list finish-items)])
+           (parse-ast-item item validate?)))
+       (make-parse-results source
+                           (reverse (append (reverse finish-results) acc)))]
+      [else
+       (define-values (line-results next-state)
+         (with-handlers
+           ([exn:fail?
+             (lambda (e)
+               (values (list (make-line-parse-error source
+                                                    line-number
+                                                    line-text
+                                                    e))
+                       state))])
+           (define-values (items new-state)
+             (parse-gnu-line/state line-text source line-number state))
+           (values (for/list ([item (in-list items)])
+                     (parse-ast-item item validate?))
+                   new-state)))
+       (loop (add1 line-number)
+             next-state
+             (append (reverse line-results) acc))])))
+
 ;; ============================================================
 ;; 单条指令解析
 ;; ============================================================
@@ -174,45 +220,59 @@
   (with-handlers
     ([exn:fail?
       (lambda (e)
-        ;; 清理错误消息，去除 Racket 内部格式
-        (define raw-msg (exn-message e))
-        (define clean-msg
-          (cond
-            ;; 匹配失败错误
-            [(regexp-match #rx"^match: no matching clause for (.+)$" raw-msg)
-             => (lambda (m) (format "无法解析: ~a" (cadr m)))]
-            ;; 自定义错误 (parse-instruction: ...)
-            [(regexp-match #rx"^parse-[^:]+: (.+)$" raw-msg)
-             => (lambda (m) (cadr m))]
-            ;; 其他错误保持原样
-            [else raw-msg]))
         (parse-result #f
                       (syntax->srcloc stx)
                       #f
-                      (parse-error clean-msg
+                      (parse-error (clean-parse-message (exn-message e))
                                    (syntax->srcloc stx)
                                    'syntax)))])
     ;; 判断是指令还是元语法指令
-    (cond
-      [(directive-form? stx)
-       ;; 元语法指令 - 不进行验证
-       (define dir (parse-directive/stx stx))
-       (parse-result dir (ast-srcloc dir) #f #f)]
-      [else
-       ;; 普通指令
-       (define ins (parse-instruction/stx stx))
-       (define validation
-         (and validate? (validate-instruction ins)))
-       (define has-validation-error?
-         (and validation (validation-error? validation)))
-       (if has-validation-error?
-           (parse-result ins
-                         (ast-srcloc ins)
-                         validation
-                         (parse-error (validation-result-error-message validation)
-                                      (ast-srcloc ins)
-                                      'validation))
-           (parse-result ins (ast-srcloc ins) validation #f))])))
+    (parse-ast-item
+     (if (directive-form? stx)
+         (parse-directive/stx stx)
+         (parse-instruction/stx stx))
+     validate?)))
+
+(define (parse-ast-item item validate?)
+  (cond
+    [(ast-directive? item)
+     ;; 元语法指令 - 不进行指令级验证
+     (parse-result item (ast-srcloc item) #f #f)]
+    [(ast-ins? item)
+     (define validation
+       (and validate? (validate-instruction item)))
+     (define has-validation-error?
+       (and validation (validation-error? validation)))
+     (if has-validation-error?
+         (parse-result item
+                       (ast-srcloc item)
+                       validation
+                       (parse-error (validation-result-error-message validation)
+                                    (ast-srcloc item)
+                                    'validation))
+         (parse-result item (ast-srcloc item) validation #f))]
+    [else
+     (error 'parse-ast-item "期待 AST 指令或元语法指令，得到: ~a" item)]))
+
+(define (clean-parse-message raw-msg)
+  (cond
+    ;; 匹配失败错误
+    [(regexp-match #rx"^match: no matching clause for (.+)$" raw-msg)
+     => (lambda (m) (format "无法解析: ~a" (cadr m)))]
+    ;; 自定义错误 (parse-instruction: ... / gnu-parser: ...)
+    [(regexp-match #rx"^(?:parse-[^:]+|gnu-parser): (.+)$" raw-msg)
+     => (lambda (m) (cadr m))]
+    ;; 其他错误保持原样
+    [else raw-msg]))
+
+(define (make-line-parse-error source line-number line-text e)
+  (define err-loc (srcloc source line-number 0 #f (string-length line-text)))
+  (parse-result #f
+                err-loc
+                #f
+                (parse-error (clean-parse-message (exn-message e))
+                             err-loc
+                             'syntax)))
 
 ;; ============================================================
 ;; 构造 parse-results

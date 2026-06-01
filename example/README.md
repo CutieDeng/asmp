@@ -1,6 +1,6 @@
-# multiavl 汇编器示例
+# asmp 汇编器示例
 
-本目录包含 multiavl Lisp S-expression 汇编语法的示例文件。
+本目录包含 asmp Lisp S-expression 汇编语法的示例文件。
 
 ## 运行示例
 
@@ -22,6 +22,20 @@ racket cli/as.rkt --no-verify-save-load example/005-function.d
 
 # 运行 example 编译测试
 racket test/example-test.rkt
+
+# GNU 输入前端示例
+racket cli/as.rkt --gnu-input -o /tmp/hello.s example/010-gnu-hello.asm
+
+# macOS/Mach-O 输出需要显式使用 --apple
+racket cli/as.rkt --gnu-input --apple -o /tmp/hello-apple.s example/010-gnu-hello.asm
+
+# macOS 可直接链接运行的 main + puts 示例
+racket cli/as.rkt --gnu-input --apple -o /tmp/macos-hello.s example/012-macos-standalone-hello.asm
+clang /tmp/macos-hello.s -o /tmp/macos-hello
+
+# GNU 输入，独立 Linux AArch64 hello world (_start + syscall)
+racket cli/as.rkt --gnu-input -o /tmp/standalone-hello.s example/011-gnu-standalone-hello.asm
+clang -target aarch64-linux-gnu -c /tmp/standalone-hello.s -o /tmp/standalone-hello.o
 ```
 
 ## 语法概览
@@ -117,6 +131,12 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 | `04-function.d` | 函数调用约定、栈帧 |
 | `05-virtual-reg.d` | 虚拟寄存器、寄存器分配 |
 | `06-abi.d` | ABI 声明、叶函数、裸函数 |
+| `009-deflate-fixed-fast.d` | AArch64 fixed-Huffman deflate fast path |
+| `010-gnu-hello.asm` | GNU 输入前端 hello world 函数示例 |
+| `011-gnu-standalone-hello.asm` | GNU 输入前端独立 Linux AArch64 hello world |
+| `012-macos-standalone-hello.asm` | GNU 输入前端 macOS main + puts hello world |
+
+GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs/gnu-frontend-syntax.md)。
 
 ## ARM64 ABI 摘要
 

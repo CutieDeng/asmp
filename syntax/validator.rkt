@@ -11,7 +11,8 @@
          "spec.rkt"
          "operand-type.rkt"
          "constraint.rkt"
-         "class.rkt")
+         "class.rkt"
+         racket/runtime-path)
 
 (provide
   ;; 主验证函数
@@ -82,6 +83,9 @@
 ;; 别名转换表 (从缓存加载)
 ;; ============================================================
 
+(define-runtime-path alias-transform-path "data/cached/index-alias-transform.rktd")
+(define-runtime-path pred-qualifier-path "data/generated/instruction-spec.rktd")
+
 (define alias-transform-index #f)
 
 (define (get-alias-transform-index)
@@ -90,9 +94,8 @@
   alias-transform-index)
 
 (define (load-alias-transform-index)
-  (define path "syntax/data/cached/index-alias-transform.rktd")
-  (if (file-exists? path)
-      (with-input-from-file path
+  (if (file-exists? alias-transform-path)
+      (with-input-from-file alias-transform-path
         (lambda ()
           (let loop ([h (make-hash)])
             (define datum (read))
@@ -402,9 +405,8 @@
 
 ;; 从 instruction-spec.rktd 提取谓词限定符要求
 (define (load-pred-qualifier-data)
-  (define path "syntax/data/generated/instruction-spec.rktd")
-  (if (file-exists? path)
-      (with-input-from-file path
+  (if (file-exists? pred-qualifier-path)
+      (with-input-from-file pred-qualifier-path
         (lambda ()
           (let loop ([h (make-hash)])
             (define datum (read))

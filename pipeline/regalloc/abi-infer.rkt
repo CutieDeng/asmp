@@ -124,6 +124,13 @@
 (define (infer-result-signature)
   (list (default-abi-name) (abi-config-signature)))
 
+(define (extern-abi-key cfg)
+  (sort
+   (for/list ([(name abi-name) (in-hash (cfg-get-info cfg 'extern-abi-names (hash)))])
+     (list name abi-name))
+   string<?
+   #:key (lambda (entry) (symbol->string (car entry)))))
+
 ;; 生成函数体摘要 key。
 ;; 直接使用函数 blocks 持久化结构作为 equal?-key，避免构造额外摘要对象。
 ;; 该 key 包含 srcloc / block-id 等信息，因此对“同源码重复构建 CFG”复用友好；
@@ -164,11 +171,14 @@
           (vector-set! summary-ids-vec i (fn-local-summary-id summary)))
 
         ;; 2) 尝试按“程序结构签名”复用已准备结果
+        (define extern-key (extern-abi-key cfg))
         (define structure-key
-          (for/list ([i (in-range n)])
-            (list (vector-ref names-vec i)
-                  (vector-ref declared-abi-names-vec i)
-                  (vector-ref summary-ids-vec i))))
+          (list
+           extern-key
+           (for/list ([i (in-range n)])
+             (list (vector-ref names-vec i)
+                   (vector-ref declared-abi-names-vec i)
+                   (vector-ref summary-ids-vec i)))))
         (define structure-cached
           (hash-ref *infer-prepared-structure-cache* structure-key #f))
         (if structure-cached
@@ -631,13 +641,26 @@
         (hash-set! declared-scratch-defs fn-name
                    (hash-ref abi-name->scratch abi-name inferred-abi-empty)))))
 
+  ;; 外部函数可单独声明 ABI；调用这些符号时按声明 ABI 的 scratch 集处理。
+  (for ([(fn-name abi-name) (in-hash (cfg-get-info cfg 'extern-abi-names (hash)))])
+    (define abi (resolve-abi abi-name))
+    (unless abi
+      (error 'infer-all-abis "extern 函数 '~a' 指定的 ABI '~a' 未定义" fn-name abi-name))
+    (hash-set! declared-scratch-defs fn-name
+               (hash-ref abi-name->scratch abi-name inferred-abi-empty)))
+
   ;; 预计算默认 ABI 的 scratch-def（未知/动态调用回退）
   (define default-scratch-def
-    (let ([default-abi (and (default-abi-name)
-                            (get-abi-by-name (default-abi-name)))])
-      (if default-abi
-          (abi-to-scratch-def default-abi)
-          inferred-abi-empty)))
+    (let* ([name0 (default-abi-name)]
+           [name (if (eq? name0 'auto) 'aapcs64 name0)])
+      (cond
+        [name
+         (define abi (get-abi-by-name name))
+         (unless abi
+           (error 'infer-all-abis "默认 ABI '~a' 未定义" name))
+         (abi-to-scratch-def abi)]
+        [else
+         (abi-to-scratch-def arm64-abi)])))
 
   ;; 3. 按拓扑序（逆序 SCC）计算不动点
   ;; result-vec : vector[index → inferred-abi]

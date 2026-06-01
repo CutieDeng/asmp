@@ -13,7 +13,8 @@
 ;; 数据来源: semantic/data/use-def-patterns.rktd
 ;; 通过 tool/extract/use-def-extractor.rkt 从 MRS 约束数据生成
 
-(require "../parser/ast.rkt")
+(require "../parser/ast.rkt"
+         racket/runtime-path)
 
 ;; 模块位置: semantic/use-def.rkt
 
@@ -71,7 +72,7 @@
 ;; Use/Def 模式数据库 (从 .rktd 文件加载)
 ;; ============================================================
 
-(define patterns-path "semantic/data/use-def-patterns.rktd")
+(define-runtime-path patterns-path "data/use-def-patterns.rktd")
 
 ;; 内存缓存
 (define *use-def-db* (box #f))

@@ -47,9 +47,9 @@
 ;; 禁止以数字开头的变量名，如 z.0、p.123
 (define *check-virtual-name-format* (make-parameter #t))
 
-;; 是否检查 ABI 声明（默认开启）
-;; 每个使用虚拟寄存器的函数必须声明 ABI
-(define *check-abi-declaration* (make-parameter #t))
+;; 是否检查 ABI 声明（默认关闭）
+;; ABI 更适合作为 call 边界约束；函数自身不需要为了使用虚拟寄存器而声明 ABI。
+(define *check-abi-declaration* (make-parameter #f))
 
 ;; ============================================================
 ;; 错误结构

@@ -105,6 +105,11 @@
 (define (reg-kind->asm-prefix kind)
   (hash-ref *reg-prefix-cache* kind "?"))
 
+(define (emit-comment-prefix config)
+  (case (emit-config-syntax config)
+    [(gnu) "//"]
+    [else (string (emit-config-comment-char config))]))
+
 ;; ============================================================
 ;; 端口输出辅助函数
 ;; ============================================================
@@ -168,6 +173,129 @@
 ;; 操作数输出
 ;; ============================================================
 
+(define (reloc->gnu-prefix reloc)
+  (case reloc
+    ;; GNU AArch64 assemblers infer the page relocation from ADRP's operand.
+    ;; LLVM integrated assembler rejects ":pg_hi21:sym" in that position.
+    [(PAGE) ""]
+    [(PAGEOFF) ":lo12:"]
+    [(GOTPAGE) ":got:"]
+    [(GOTPAGEOFF) ":got_lo12:"]
+    [else (error 'emit-operand "未知 relocation 修饰符: ~a" reloc)]))
+
+(define (reloc->apple-suffix reloc)
+  (case reloc
+    [(PAGE) "@PAGE"]
+    [(PAGEOFF) "@PAGEOFF"]
+    [(GOTPAGE) "@GOTPAGE"]
+    [(GOTPAGEOFF) "@GOTPAGEOFF"]
+    [else (error 'emit-operand "未知 relocation 修饰符: ~a" reloc)]))
+
+(define (emit-data-value/port value port)
+  (cond
+    [(integer? value) (port-display port value)]
+    [(string? value) (write value port)]
+    [(ast-label? value) (emit-operand/port value port)]
+    [else (port-display port value)]))
+
+(define (emit-data-values/port values port)
+  (for ([value (in-list values)]
+        [i (in-naturals)])
+    (when (> i 0)
+      (port-write-string port ", "))
+    (emit-data-value/port value port)))
+
+(define (sized-data-directive->asm kind)
+  (case kind
+    [(byte) ".byte"]
+    [(byte2) ".2byte"]
+    [(byte4) ".4byte"]
+    [(byte8) ".8byte"]
+    [(byte16 byte32) ".octa"]
+    [else #f]))
+
+(define (sized-data-width kind)
+  (case kind
+    [(byte) 1]
+    [(byte2) 2]
+    [(byte4) 4]
+    [(byte8) 8]
+    [(byte16) 16]
+    [(byte32) 32]
+    [else (error 'emit-directive "未知数据宽度 directive: ~a" kind)]))
+
+(define (integer-in-sized-data-range? kind n)
+  (define bits (* 8 (sized-data-width kind)))
+  (<= (- (expt 2 (sub1 bits))) n (sub1 (expt 2 bits))))
+
+(define (integer->unsigned-sized-data kind n)
+  (define bits (* 8 (sized-data-width kind)))
+  (define modulus (expt 2 bits))
+  (if (negative? n) (+ modulus n) n))
+
+(define (byte32-octa-parts n)
+  (define unit (expt 2 128))
+  (define u (integer->unsigned-sized-data 'byte32 n))
+  (values (modulo u unit) (quotient u unit)))
+
+(define (emit-sized-data-values/port kind values port)
+  (case kind
+    [(byte32)
+     (for ([value (in-list values)]
+           [i (in-naturals)])
+       (unless (integer? value)
+         (error 'emit-directive ".byte32 supports integer values only"))
+       (unless (integer-in-sized-data-range? kind value)
+         (error 'emit-directive ".byte32 integer out of range: ~a" value))
+       (define-values (low high) (byte32-octa-parts value))
+       (when (> i 0)
+         (port-write-string port ", "))
+       (port-display port low)
+       (port-write-string port ", ")
+       (port-display port high))]
+    [else
+     (for ([value (in-list values)])
+       (when (integer? value)
+         (unless (integer-in-sized-data-range? kind value)
+           (error 'emit-directive ".~a integer out of range: ~a" kind value)))
+       (when (and (> (sized-data-width kind) 8)
+                  (not (integer? value)))
+         (error 'emit-directive ".~a supports integer values only" kind)))
+     (emit-data-values/port values port)]))
+
+(define (section-name-for-config name config)
+  (define raw (format "~a" name))
+  (case (emit-config-syntax config)
+    [(apple)
+     (case (string->symbol raw)
+       [(.rodata) "__TEXT,__const"]
+       [(.bss) "__DATA,__bss"]
+       [else raw])]
+    [else raw]))
+
+(define (emit-label-name/port name port)
+  (define fn-name (current-function-name))
+  (define local-labels (current-function-labels))
+  (define label-aliases (current-function-label-aliases))
+  (define canonical-name (hash-ref label-aliases name name))
+  ;; 输出基础标签名
+  (cond
+    ;; 被合并的标签 -> 输出函数名
+    [(set-member? (merged-labels) canonical-name)
+     (define prefix (emit-config-label-prefix (current-emit-config)))
+     (unless (string=? prefix "")
+       (port-write-string port prefix))
+     (port-display port fn-name)]
+    ;; 函数内的局部标签
+    [(and fn-name (set-member? local-labels name))
+     (port-write-string port (make-local-label fn-name canonical-name))]
+    ;; 外部引用 (函数名等)
+    [else
+     (define prefix (emit-config-label-prefix (current-emit-config)))
+     (unless (string=? prefix "")
+       (port-write-string port prefix))
+     (port-display port name)]))
+
 ;; 直接写入端口版本
 (define (emit-operand/port op port)
   (match op
@@ -207,29 +335,20 @@
 
     ;; 标签引用
     [(ast-label name reloc _)
-     (define fn-name (current-function-name))
-     (define local-labels (current-function-labels))
-     ;; 输出基础标签名
-     (cond
-       ;; 被合并的标签 -> 输出函数名
-       [(set-member? (merged-labels) name)
-        (define prefix (emit-config-label-prefix (current-emit-config)))
-        (unless (string=? prefix "")
-          (port-write-string port prefix))
-        (port-display port fn-name)]
-       ;; 函数内的局部标签
-       [(and fn-name (set-member? local-labels name))
-        (port-write-string port (make-local-label fn-name name))]
-       ;; 外部引用 (函数名等)
+     (case (emit-config-syntax (current-emit-config))
+       [(gnu)
+        (when reloc
+          (port-write-string port (reloc->gnu-prefix reloc)))
+        (emit-label-name/port name port)]
+       [(apple)
+        (emit-label-name/port name port)
+        (when reloc
+          (port-write-string port (reloc->apple-suffix reloc)))]
        [else
-        (define prefix (emit-config-label-prefix (current-emit-config)))
-        (unless (string=? prefix "")
-          (port-write-string port prefix))
-        (port-display port name)])
-     ;; 输出 relocation 修饰符
-     (when reloc
-       (port-write-string port "@")
-       (port-display port reloc))]
+        (emit-label-name/port name port)
+        (when reloc
+          (port-write-string port "@")
+          (port-display port reloc))])]
 
     ;; 移位
     [(ast-shift kind amount _)
@@ -414,7 +533,7 @@
     ;; 节
     [(section)
      (port-write-string port ".section ")
-     (port-display port name)
+     (port-display port (section-name-for-config name config))
      #t]
 
     ;; 对齐 (在代码段中使用 nop 填充)
@@ -432,12 +551,27 @@
      (port-display port name)
      #t]
 
+    ;; 数据
+    [(ascii asciz)
+     (port-write-string port ".")
+     (port-display port kind)
+     (port-write-string port " ")
+     (emit-data-values/port args port)
+     #t]
+
+    [(byte byte2 byte4 byte8 byte16 byte32)
+     (port-write-string port (sized-data-directive->asm kind))
+     (port-write-string port " ")
+     (emit-sized-data-values/port kind args port)
+     #t]
+
     ;; save!/load!/weak-mov - 不直接输出 (由寄存器分配器处理)
     [(save! load! weak-mov) #f]
 
     ;; 其他
     [else
-     (port-write-string port "; unknown directive: ")
+     (port-write-string port (emit-comment-prefix config))
+     (port-write-string port " unknown directive: ")
      (port-display port kind)
      #t]))
 
@@ -457,6 +591,10 @@
 
 ;; 当前函数的局部标签集合 (用于区分局部/外部引用)
 (define current-function-labels (make-parameter (set)))
+
+;; Same-position labels are represented as aliases of the one label emitted
+;; for a block. This keeps inline-expanded call-site labels branchable.
+(define current-function-label-aliases (make-parameter (hash)))
 
 ;; 被合并到函数名的标签集合 (当 merge-colocated-labels? 启用时使用)
 (define merged-labels (make-parameter (set)))
@@ -489,6 +627,13 @@
     (for/set ([kv (in-ordered-map (asm-function-label->id fn))])
       (car kv)))
 
+  ;; Map every known label to the primary label printed for its basic block.
+  (define label-aliases
+    (for/hash ([kv (in-ordered-map (asm-function-label->id fn))])
+      (define label (car kv))
+      (define bbid (cdr kv))
+      (values label (or (fn-get-label fn bbid) label))))
+
   ;; 计算需要合并的标签 (入口块的局部标签，且不等于函数名)
   (define entry-id (asm-function-entry fn))
   (define entry-label
@@ -519,6 +664,7 @@
   ;; 设置当前函数上下文
   (parameterize ([current-function-name fn-name]
                  [current-function-labels local-labels]
+                 [current-function-label-aliases label-aliases]
                  [merged-labels labels-to-merge]
                  [local-label-ids label-id-map])
 
@@ -616,11 +762,14 @@
 
 (define (emit-module/port cfg port)
   (define config (current-emit-config))
+  (define comment-prefix (emit-comment-prefix config))
 
   ;; 文件头
-  (port-write-string port "; Generated by multiavl")
+  (port-write-string port comment-prefix)
+  (port-write-string port " Generated by asmp")
   (port-newline port)
-  (port-write-string port "; Syntax: ")
+  (port-write-string port comment-prefix)
+  (port-write-string port " Syntax: ")
   (port-display port (emit-config-syntax config))
   (port-newline port)
   (port-newline port)
@@ -631,9 +780,20 @@
   ;; 所有函数
   (for ([i (in-range (cfg-function-count cfg))])
     (define fn (cfg-get-function cfg i))
-    (when fn
+    (when (and fn (not (fn-get-info fn 'inline-only #f)))
       (emit-function/port fn port)
-      (port-newline port))))
+      (port-newline port)))
+
+  (emit-module-items/port (cfg-get-info cfg 'module-items '()) port))
+
+(define (emit-module-items/port items port)
+  (when (pair? items)
+    (port-newline port)
+    (for ([item (in-list items)])
+      (define rendered (emit-directive item))
+      (unless (string=? rendered "")
+        (port-write-string port rendered)
+        (port-newline port)))))
 
 ;; 返回字符串版本 (兼容)
 (define (emit-module cfg)

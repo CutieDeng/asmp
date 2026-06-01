@@ -177,7 +177,29 @@
     (define asm (compile-to-asm source))
     ;; callee 的 ret 应该被变换为 b 出口标签
     (check-pred (lambda (s) (asm-contains? s "b Lcaller\\$inl_caller_callee_1__exit")) asm
-                "ret 应变换为跳转到出口标签")))
+                "ret 应变换为跳转到出口标签"))
+
+  (test-case "branch to label colocated with inline call"
+    (define source "
+(: function callee)
+(: label entry)
+  (add x0 x0 1)
+  (ret)
+(: end-function)
+
+(: function caller)
+(: label entry)
+  (b target)
+(: label target)
+  (: inline callee)
+  (ret)
+(: end-function)
+")
+    (define asm (compile-to-asm source))
+    ;; The caller label is colocated with the inlined callee entry label.
+    ;; It must remain branchable as a local label, not leak as an external name.
+    (check-pred (lambda (s) (asm-not-contains? s "b target")) asm
+                "同位置 inline 标签不应丢失 caller 标签")))
 
 (define-test-suite variable-renaming-tests
   (test-case "虚拟寄存器重命名避免冲突"

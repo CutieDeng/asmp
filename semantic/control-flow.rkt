@@ -16,6 +16,11 @@
 
 (require "../parser/ast.rkt"
          "../syntax/operand-type.rkt"
+         (only-in "use-def.rkt"
+                  extract-use-def
+                  use-def-flat-defs
+                  reg-ref-id
+                  reg-ref-position)
          "branch-info.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
@@ -91,6 +96,8 @@
   ;; 验证
   verify-label-references       ; fn cfg -> pvector of label-ref-error
   (struct-out label-ref-error)  ; 标签引用错误信息
+  verify-sp-write-discipline    ; fn -> pvector of sp-write-error
+  (struct-out sp-write-error)   ; 源码层直接写 SP 的诊断信息
 
   ;; 符号名验证
   valid-asm-symbol?             ; symbol -> boolean
@@ -233,6 +240,44 @@
    cfg-debug-empty
    (ordered-map-empty symbol-compare)))
 
+(define module-directive-kinds
+  '(section align global label ascii asciz byte byte2 byte4 byte8 byte16 byte32))
+
+(define (module-directive? item)
+  (and (ast-directive? item)
+       (memq (ast-directive-kind item) module-directive-kinds)))
+
+(define (append-module-item cfg item)
+  (define items (cfg-get-info cfg 'module-items '()))
+  (cfg-set-info cfg 'module-items (append items (list item))))
+
+(define (drop-function-global-module-items cfg)
+  (define function-names
+    (for/set ([kv (in-ordered-map (control-flow-graph-fn-names cfg))])
+      (car kv)))
+  (define items
+    (filter (lambda (item)
+              (not (match item
+                     [(ast-directive 'global name _ _)
+                      (set-member? function-names name)]
+                     [_ #f])))
+            (cfg-get-info cfg 'module-items '())))
+  (cfg-set-info cfg 'module-items items))
+
+(define (extern-arg-kind args)
+  (if (and (list? args)
+           (member 'var args))
+      'var
+      'func))
+
+(define (extern-arg-abi args)
+  (and (list? args)
+       (for/first ([arg (in-list args)]
+                   #:when (and (list? arg)
+                               (= (length arg) 2)
+                               (eq? (car arg) 'abi)))
+         (cadr arg))))
+
 ;; ============================================================
 ;; CFG 构建
 ;; ============================================================
@@ -251,7 +296,8 @@
                #:when (or (ast-ins? item) (ast-directive? item)))
       (process-item b item)))
 
-  (builder-cfg (finalize-current-function final-builder)))
+  (drop-function-global-module-items
+   (builder-cfg (finalize-current-function final-builder))))
 
 (define (process-item b item)
   (match item
@@ -271,23 +317,33 @@
 
     [(ast-directive 'extern name args _)
      ;; 将 extern 符号添加到 CFG 的 info 中
-     ;; args: '(func) 表示函数，'(var) 表示变量
+     ;; args: '(func) / '(var) 表示符号类型，可附带 '(abi <name>) 作为调用 ABI。
      (define cfg (builder-cfg b))
-     (define kind (if (equal? args '(var)) 'var 'func))
+     (define kind (extern-arg-kind args))
+     (define abi-name (extern-arg-abi args))
      (define extern-syms (cfg-get-info cfg 'extern-symbols (set)))
      (define extern-vars (cfg-get-info cfg 'extern-vars (set)))
+     (define extern-abi-names (cfg-get-info cfg 'extern-abi-names (hash)))
      (define new-cfg
-       (if (eq? kind 'var)
-           (cfg-set-info (cfg-set-info cfg 'extern-symbols (set-add extern-syms name))
-                         'extern-vars (set-add extern-vars name))
-           (cfg-set-info cfg 'extern-symbols (set-add extern-syms name))))
+       (let* ([cfg* (if (eq? kind 'var)
+                        (cfg-set-info (cfg-set-info cfg 'extern-symbols (set-add extern-syms name))
+                                      'extern-vars (set-add extern-vars name))
+                        (cfg-set-info cfg 'extern-symbols (set-add extern-syms name)))]
+              [cfg** (if (and (eq? kind 'func) abi-name)
+                         (cfg-set-info cfg* 'extern-abi-names
+                                       (hash-set extern-abi-names name abi-name))
+                         cfg*)])
+         cfg**))
      (struct-copy builder b [cfg new-cfg])]
 
     [_
      (if (builder-current-fn-id b)
          (struct-copy builder b
                       [current-items (cons item (builder-current-items b))])
-         b)]))
+         (if (module-directive? item)
+             (struct-copy builder b
+                          [cfg (append-module-item (builder-cfg b) item)])
+             b))]))
 
 (define (finalize-current-function b)
   (cond
@@ -412,9 +468,15 @@
 (define (create-blocks-with-graph instructions label-positions block-starts start-bb-id)
   (define n-instructions (pvector-length instructions))
 
-  (define pos-to-label
-    (for/hash ([(name pos) (in-hash label-positions)])
-      (values pos name)))
+  (define pos-to-labels
+    (for/fold ([h (hash)])
+              ([(name pos) (in-hash label-positions)])
+      (hash-update h pos (lambda (labels) (cons name labels)) '())))
+
+  (define (sort-labels labels)
+    (sort labels
+          (lambda (a b)
+            (string<? (symbol->string a) (symbol->string b)))))
 
   (for/fold ([g graph-empty]
              [blocks (ordered-map-empty integer-compare)]
@@ -443,7 +505,8 @@
         (pvector-cons-right pv (pvector-ref instructions idx))))
 
     ;; 标签
-    (define label (hash-ref pos-to-label start #f))
+    (define labels (sort-labels (hash-ref pos-to-labels start '())))
+    (define label (and (pair? labels) (car labels)))
 
     ;; debug 信息
     (define stx-begin
@@ -468,7 +531,9 @@
     (define new-id->label
       (if label (ordered-map-set id->label next-bb label) id->label))
     (define new-label->id
-      (if label (ordered-map-set label->id label bbid) label->id))
+      (for/fold ([m label->id])
+                ([lbl (in-list labels)])
+        (ordered-map-set m lbl bbid)))
     (define new-vid->bbid (ordered-map-set vid->bbid (vertex-id-val vid) bbid))
     (define new-bbid->vid (ordered-map-set bbid->vid next-bb vid))
 
@@ -751,6 +816,70 @@
   (string-join (append node-lines edge-lines) "\n"))
 
 ;; ============================================================
+;; SP 写入纪律验证
+;; ============================================================
+
+;; 源码层直接写 SP 的诊断信息
+(struct sp-write-error
+  (function-name  ; symbol - 所在函数名
+   instruction    ; ast-ins - 写入 SP 的源指令
+   srcloc         ; srcloc - 源码位置
+   reason)        ; string - 写入原因
+  #:transparent)
+
+(define (sp-reg? op)
+  (and (ast-reg? op)
+       (eq? (ast-reg-id op) 'sp)))
+
+(define (sp-reg-ref? ref)
+  (eq? (reg-ref-id ref) 'sp))
+
+(define (sp-indexed-memory-write? op)
+  (and (ast-mem? op)
+       (sp-reg? (ast-mem-base op))
+       (memq (ast-mem-index-mode op) '(pre post))))
+
+(define (instruction-sp-write-reason ins)
+  (match ins
+    [(ast-ins _ _ operands _)
+     (define sp-defs
+       (filter sp-reg-ref?
+               (use-def-flat-defs (extract-use-def ins))))
+     (cond
+       [(for/or ([op (in-list operands)])
+          (sp-indexed-memory-write? op))
+        "pre/post-index 内存寻址会更新 sp"]
+       [(for/or ([ref (in-list sp-defs)])
+          (eq? (reg-ref-position ref) 'direct))
+        "指令定义了 sp"]
+       [(pair? sp-defs)
+        "指令通过寻址副作用更新 sp"]
+       [else #f])]
+    [_ #f]))
+
+;; 验证函数中的源码层 SP 写入。
+;; .save/.restore 是 ast-directive，后续由 save-load 管线展开，不在这里拦截。
+(define (verify-sp-write-discipline fn)
+  (define fn-name (asm-function-name fn))
+  (define errors (box (pvector-empty)))
+  (fn-for-each-block
+   fn
+   (lambda (block)
+     (for ([ins (in-pvector (basic-block-instructions block))])
+       (when (ast-ins? ins)
+         (define reason (instruction-sp-write-reason ins))
+         (when reason
+           (set-box! errors
+                     (pvector-cons-right
+                      (unbox errors)
+                      (sp-write-error
+                       fn-name
+                       ins
+                       (ast-srcloc ins)
+                       reason))))))))
+  (unbox errors))
+
+;; ============================================================
 ;; 标签引用验证
 ;; ============================================================
 
@@ -792,8 +921,18 @@
   ;; 收集声明的 extern 符号
   (define extern-symbols (cfg-get-info cfg 'extern-symbols (set)))
 
+  ;; 收集模块级数据/全局符号，允许函数引用同文件数据标签
+  (define module-symbols
+    (for/fold ([symbols (set)])
+              ([item (in-list (cfg-get-info cfg 'module-items '()))])
+      (match item
+        [(ast-directive (or 'label 'global) name _ _)
+         (set-add symbols name)]
+        [_ symbols])))
+
   ;; 有效的标签 = 本地标签 + 外部函数名 + extern 符号
-  (define valid-labels (set-union local-labels external-symbols extern-symbols))
+  (define valid-labels
+    (set-union local-labels external-symbols extern-symbols module-symbols))
 
   ;; 遍历所有指令，检查标签引用
   (define errors (box (pvector-empty)))

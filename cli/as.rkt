@@ -8,7 +8,7 @@
 ;; 用法: racket cli/as.rkt [options] <input-file>
 ;;
 ;; 功能阶段:
-;;   1. 解析 (parse)      - Lisp S-expr → AST
+;;   1. 解析 (parse)      - Lisp S-expr / GNU as → AST
 ;;   2. 验证 (validate)   - Layer1/2/3 语法检查
 ;;   3. CFG  (cfg)        - 控制流图构建
 ;;   4. 分配 (regalloc)   - 寄存器分配
@@ -59,6 +59,7 @@
 (define verbose-level (make-parameter 0))  ; 0=quiet, 1=summary, 2=detail, 3=trace
 
 ;; 汇编语法
+(define input-syntax (make-parameter 'sexp)) ; 'sexp | 'gnu | 'auto
 (define asm-syntax (make-parameter 'gnu))  ; 'gnu | 'apple
 (define emit-cfi (make-parameter #f))
 (define skip-redundant-mov (make-parameter #f))  ; 默认保留所有指令
@@ -86,6 +87,7 @@
 (define verify-label-refs-flag (make-parameter #t))  ; 检查标签引用
 (define verify-symbol-names-flag (make-parameter #t)) ; 检查符号名合法性
 (define pedantic-flag (make-parameter #f))           ; 严格检查（默认关闭）
+(define sp-write-policy (make-parameter 'warn))      ; 'allow | 'warn | 'error
 
 ;; ============================================================
 ;; 阶段定义
@@ -225,6 +227,20 @@
   (format "~a: ~a: [pedantic] 函数 '~a' 可能 fall-through (~a 条指令，末尾无终止指令)"
           loc-str ins-str fn-name count))
 
+;; 格式化源码层 SP 写入诊断
+(define (format-sp-write-error err)
+  (define fn-name (sp-write-error-function-name err))
+  (define ins (sp-write-error-instruction err))
+  (define loc (sp-write-error-srcloc err))
+  (define reason (sp-write-error-reason err))
+
+  (define loc-str (if loc (format-srcloc loc) "<unknown>"))
+  (format "~a: ~a: 函数 '~a' 直接写入 sp (~a)。请使用 .asmp.save/.asmp.restore 等栈管理指令"
+          loc-str
+          (ast->string ins)
+          fn-name
+          reason))
+
 ;; ============================================================
 ;; 阶段 1: 解析
 ;; ============================================================
@@ -236,14 +252,17 @@
   #:transparent)
 
 (define (run-parse-stage input-file)
+  (define syntax-mode (resolve-input-syntax input-file))
   (when (>= (verbose-level) 1)
-    (eprintf "阶段 1: 解析 ~a\n" input-file))
+    (eprintf "阶段 1: 解析 ~a (~a 输入)\n" input-file syntax-mode))
 
   (unless (file-exists? input-file)
     (error 'as "文件不存在: ~a" input-file))
 
   (define results
-    (parse-file input-file #:validate? (not (skip-validation))))
+    (parse-file input-file
+                #:validate? (not (skip-validation))
+                #:syntax syntax-mode))
 
   (define items
     (for/list ([r (in-list (parse-results-items results))]
@@ -361,6 +380,15 @@
           (pvector-append errs (verify-symbol-names fn)))
         (pvector-empty)))
 
+  ;; 默认警告源码层直接写 sp；严格模式下作为 CFG 错误。
+  (define sp-write-findings
+    (case (sp-write-policy)
+      [(allow) (pvector-empty)]
+      [else
+       (for/fold ([errs (pvector-empty)])
+                 ([fn (in-list functions)])
+         (pvector-append errs (verify-sp-write-discipline fn)))]))
+
   ;; 格式化标签引用错误
   (define label-ref-error-msgs
     (for/fold ([msgs (pvector-empty)])
@@ -372,6 +400,16 @@
     (for/fold ([msgs (pvector-empty)])
               ([err (in-pvector sn-errors)])
       (pvector-cons-right msgs (format-symbol-name-error err))))
+
+  ;; 格式化 SP 写入诊断
+  (define sp-write-msgs
+    (for/fold ([msgs (pvector-empty)])
+              ([err (in-pvector sp-write-findings)])
+      (pvector-cons-right msgs (format-sp-write-error err))))
+
+  (when (eq? (sp-write-policy) 'warn)
+    (for ([msg (in-pvector sp-write-msgs)])
+      (eprintf "警告: ~a\n" msg)))
 
   ;; Pedantic: 检查线性 fallthrough
   (define pedantic-warnings
@@ -387,7 +425,10 @@
   (define errors (pvector-append sv-errors
                                  (pvector-append label-ref-error-msgs
                                                  (pvector-append symbol-name-error-msgs
-                                                                 pedantic-warnings))))
+                                                                 (pvector-append (if (eq? (sp-write-policy) 'error)
+                                                                                     sp-write-msgs
+                                                                                     (pvector-empty))
+                                                                                 pedantic-warnings)))))
 
   (when (>= (verbose-level) 1)
     (eprintf "  CFG: ~a 个函数\n" fn-count))
@@ -411,7 +452,8 @@
   (results        ; (listof pipeline-result)
    errors         ; pvector of string
    functions      ; (listof asm-function) — inline 展开后的函数
-   abi-info-map)  ; hash[fn-name -> function-abi-info]
+   abi-info-map   ; hash[fn-name -> function-abi-info]
+   module-items)  ; (listof ast-directive) - 函数外模块级指令/数据
   #:transparent)
 
 ;; 解析函数的 ABI 名称 → abi-config
@@ -442,6 +484,9 @@
               "函数 '~a' 的 ABI '~a' 未在配置文件中定义" fn-name abi-name))
      abi]))
 
+(define (inline-only-function? fn)
+  (fn-get-info fn 'inline-only #f))
+
 (define (run-regalloc-stage cfg functions)
   (when (>= (verbose-level) 1)
     (eprintf "阶段 3: 寄存器分配\n"))
@@ -451,6 +496,8 @@
   (define functions*
     (for/list ([i (in-range (cfg-function-count cfg*))])
       (cfg-get-function cfg* i)))
+  (define output-functions*
+    (filter (lambda (fn) (not (inline-only-function? fn))) functions*))
 
   ;; 预加载 ABI 配置
   (load-abi-config)
@@ -469,7 +516,7 @@
       (eprintf "警告: ~a\n" err)))
 
   (define results
-    (for/list ([fn (in-list functions*)])
+    (for/list ([fn (in-list output-functions*)])
       (define abi (or (resolve-function-abi fn abi-info-map) arm64-abi))
       (define config
         (make-pipeline-config
@@ -507,7 +554,8 @@
                (pipeline-result-iterations r)
                (pipeline-result-frame-size r))))
 
-  (regalloc-stage-result results errors functions* abi-info-map))
+  (regalloc-stage-result results errors output-functions* abi-info-map
+                         (cfg-get-info cfg* 'module-items '())))
 
 (define (dump-liveness-info results)
   (displayln ";; === Liveness Dump ===")
@@ -563,7 +611,7 @@
    errors)        ; (listof string)
   #:transparent)
 
-(define (run-emit-stage results)
+(define (run-emit-stage results [module-items '()])
   (when (>= (verbose-level) 1)
     (eprintf "阶段 4: 代码生成\n"))
 
@@ -577,20 +625,40 @@
                  [emit-cfi? (emit-cfi)]
                  [skip-redundant-mov? (skip-redundant-mov)]
                  [merge-colocated-labels? (merge-colocated-labels)]))
+  (define comment-prefix
+    (case (asm-syntax)
+      [(gnu) "//"]
+      [else (string (emit-config-comment-char config))]))
 
   (define assembly
     (parameterize ([current-emit-config config])
+      (define function-sections
+        (for/list ([r (in-list results)])
+          (emit-function/result r)))
+      (define module-section
+        (format-module-items module-items))
       (string-join
-       (cons (format "; Generated by multiavl\n; Syntax: ~a\n\n.text\n"
-                     (asm-syntax))
-             (for/list ([r (in-list results)])
-               (emit-function/result r)))
+       (filter (lambda (section) (not (string=? section "")))
+               (append
+                (list (format "~a Generated by asmp\n~a Syntax: ~a\n\n.text\n"
+                              comment-prefix
+                              comment-prefix
+                              (asm-syntax)))
+                function-sections
+                (list module-section)))
        "\n\n")))
 
   (when (>= (verbose-level) 1)
     (eprintf "  生成: ~a 字节汇编\n" (string-length assembly)))
 
   (emit-stage-result assembly '()))
+
+(define (format-module-items module-items)
+  (string-join
+   (filter (lambda (s) (not (string=? s "")))
+           (for/list ([item (in-list module-items)])
+             (emit-directive item)))
+   "\n"))
 
 ;; ============================================================
 ;; 输出
@@ -693,7 +761,8 @@
 
   ;; 阶段 4: 代码生成
   (define emit-result
-    (run-emit-stage (regalloc-stage-result-results regalloc-result)))
+    (run-emit-stage (regalloc-stage-result-results regalloc-result)
+                    (regalloc-stage-result-module-items regalloc-result)))
 
   ;; 输出
   (unless (perf-report)
@@ -712,6 +781,24 @@
     (error 'as "无效的阶段: ~a (可选: ~a)" str stages))
   sym)
 
+(define (parse-input-syntax str)
+  (case (string->symbol (string-downcase str))
+    [(sexp s-expression lisp) 'sexp]
+    [(gnu gas) 'gnu]
+    [(auto) 'auto]
+    [else
+     (error 'as "无效的输入语法: ~a (可选: sexp, gnu, auto)" str)]))
+
+(define (resolve-input-syntax input-file)
+  (case (input-syntax)
+    [(auto)
+     (define path-str (string-downcase (format "~a" input-file)))
+     (if (or (string-suffix? path-str ".s")
+             (string-suffix? path-str ".asm"))
+         'gnu
+         'sexp)]
+    [else (input-syntax)]))
+
 (define (parse-dump-flags str)
   (map string->symbol (string-split str ",")))
 
@@ -720,7 +807,7 @@
     (command-line
      #:program "as"
      #:usage-help
-     "multiavl 汇编器 - 从 Lisp S-expr 编译到 ARM64 汇编\n\n阶段: parse → validate → cfg → regalloc → emit"
+     "asmp 汇编器 - 从 Lisp S-expr / GNU as 编译到 ARM64 汇编\n\n阶段: parse → validate → cfg → regalloc → emit"
 
      ;; 输出选项
      #:once-each
@@ -754,6 +841,18 @@
      #:once-each
 
      ;; 汇编语法
+     [("--input-syntax") syntax
+      "输入语法 (sexp|gnu|auto，默认: sexp)"
+      (input-syntax (parse-input-syntax syntax))]
+
+     [("--gnu-input")
+      "GNU as / 传统汇编输入语法"
+      (input-syntax 'gnu)]
+
+     [("--sexp-input")
+      "S-expression 输入语法"
+      (input-syntax 'sexp)]
+
      [("--gnu")
       "GNU as 语法 (默认)"
       (asm-syntax 'gnu)]
@@ -817,6 +916,18 @@
      [("--no-verify-symbol-names")
       "不验证符号名合法性"
       (verify-symbol-names-flag #f)]
+
+     [("--allow-sp-writes")
+      "允许源码中直接写 sp (兼容旧式手写栈代码)"
+      (sp-write-policy 'allow)]
+
+     [("--warn-sp-writes")
+      "源码中直接写 sp 时发出警告 (默认)"
+      (sp-write-policy 'warn)]
+
+     [("--forbid-sp-writes")
+      "禁止源码中直接写 sp (作为 CFG 错误)"
+      (sp-write-policy 'error)]
 
      [("--pedantic")
       "启用严格检查 (警告可疑的代码模式)"
@@ -888,6 +999,7 @@
  stop-after
  dump-flags
  verbose-level
+ input-syntax
  asm-syntax
  emit-cfi
  allow-spill
@@ -897,4 +1009,5 @@
  show-hints
  skip-validation
  verify-save-load-flag
+ sp-write-policy
  check-outside-function)
