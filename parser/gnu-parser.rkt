@@ -23,11 +23,14 @@
    globals
    function-types
    pending-align
-   section)
+   section
+   pending-inline-function
+   pending-function
+   pending-call)
   #:transparent)
 
 (define (make-gnu-state)
-  (gnu-state #f #f (set) (set) #f 'text))
+  (gnu-state #f #f (set) (set) #f 'text #f #f #f))
 
 (define (loc source line [column 0] [span 0])
   (srcloc source line column #f span))
@@ -82,6 +85,21 @@
   (for ([c (in-string trimmed)])
     (unless (valid-symbol-char? c)
       (error 'gnu-parser "invalid symbol: ~a" trimmed)))
+  (string->symbol trimmed))
+
+(define managed-symbol-pattern
+  #rx"^[A-Za-z_][A-Za-z0-9_$-]*(\\.[A-Za-z_][A-Za-z0-9_$-]*)*$")
+
+(define managed-symbol-head-pattern
+  #rx"^([A-Za-z_][A-Za-z0-9_$-]*(?:\\.[A-Za-z_][A-Za-z0-9_$-]*)*)(?:[ \t]+(.*))?$")
+
+(define (parse-managed-symbol-token s what)
+  (define trimmed (string-trim s))
+  (unless (regexp-match? managed-symbol-pattern trimmed)
+    (error 'gnu-parser
+           "invalid ~a name: ~a (expected segment(.segment)*; segment starts with letter/_ and may contain -.$)"
+           what
+           trimmed))
   (string->symbol trimmed))
 
 (define (parse-number-token s)
@@ -453,6 +471,253 @@
           (list kind
                 (and abi-name (list 'abi abi-name)))))
 
+(define (parse-named-binding kind part source line)
+  (define m (regexp-match #rx"^([^=]+)=(.+)$" part))
+  (if m
+      (let ([formal (string-trim (cadr m))]
+            [actual (string-trim (caddr m))])
+        (define formal-reg (parse-reg formal source line))
+        (unless (symbol? (ast-reg-id formal-reg))
+          (error 'gnu-parser ".~a binding formal must be virtual: ~a" kind formal))
+        (list formal-reg (parse-reg actual source line)))
+      (error 'gnu-parser "invalid .~a binding: ~a" kind part)))
+
+(define (parse-inline-binding part source line)
+  (parse-named-binding "inline" part source line))
+
+(define (parse-inline-bindings parts source line)
+  (for/list ([part (in-list parts)])
+    (parse-inline-binding part source line)))
+
+(define (parse-call-bindings parts source line)
+  (for/list ([part (in-list parts)])
+    (parse-named-binding "call" part source line)))
+
+(define (parse-paren-list text what)
+  (define trimmed (string-trim text))
+  (unless (and (string-prefix? trimmed "(")
+               (string-suffix? trimmed ")"))
+    (error 'gnu-parser "~a must use (...) syntax: ~a" what text))
+  (split-top-level (substring trimmed 1 (sub1 (string-length trimmed)))))
+
+(define (parse-inline-call rest source line)
+  (define m (regexp-match managed-symbol-head-pattern rest))
+  (unless m
+    (error 'gnu-parser ".inline needs a target"))
+  (define target (parse-managed-symbol-token (cadr m) "inline target"))
+  (define arg-text (string-trim (or (caddr m) "")))
+  (define parts (parse-paren-list arg-text ".inline arguments"))
+  (values target (parse-inline-bindings parts source line)))
+
+(define (parse-call rest source line)
+  (define m (regexp-match managed-symbol-head-pattern rest))
+  (unless m
+    (error 'gnu-parser ".call needs a target"))
+  (define target (parse-managed-symbol-token (cadr m) "call target"))
+  (define arg-text (string-trim (or (caddr m) "")))
+  (define parts (parse-paren-list arg-text ".call arguments"))
+  (values target (parse-call-bindings parts source line)))
+
+(define (make-call-item target arg-text source line)
+  (define parts (parse-paren-list arg-text ".call arguments"))
+  (ast-directive 'call
+                 target
+                 (parse-call-bindings parts source line)
+                 (loc source line)))
+
+(define (parse-call-start rest source line st)
+  (define m (regexp-match managed-symbol-head-pattern rest))
+  (unless m
+    (error 'gnu-parser ".call needs a target"))
+  (define target (parse-managed-symbol-token (cadr m) "call target"))
+  (define arg-text (string-trim (or (caddr m) "")))
+  (cond
+    [(inline-signature-complete? arg-text)
+     (values (list (make-call-item target arg-text source line)) st)]
+    [else
+     (values '()
+             (struct-copy gnu-state st
+                          [pending-call (list target (list arg-text) line)]))]))
+
+(define (continue-call text source line st)
+  (match (gnu-state-pending-call st)
+    [(list target pieces start-line)
+     (define pieces* (append pieces (list text)))
+     (define arg-text (string-join pieces* " "))
+     (if (inline-signature-complete? arg-text)
+         (values (list (make-call-item target arg-text source start-line))
+                 (struct-copy gnu-state st [pending-call #f]))
+         (values '()
+                 (struct-copy gnu-state st
+                              [pending-call (list target pieces* start-line)])))]))
+
+(define (make-inline-param mode reg-text source line)
+  (define reg (parse-reg reg-text source line))
+  (unless (symbol? (ast-reg-id reg))
+    (error 'gnu-parser "inline parameter must be virtual: ~a" reg-text))
+  (list mode reg))
+
+(define (parse-inline-param-piece part current-mode source line)
+  (define trimmed (string-trim part))
+  (cond
+    [(regexp-match #rx"^(inout|in|out)[ \t]*:[ \t]*(.*)$" trimmed)
+     => (lambda (m)
+          (define mode (string->symbol (cadr m)))
+          (define rest (string-trim (caddr m)))
+          (values (if (string=? rest "")
+                      '()
+                      (list (make-inline-param mode rest source line)))
+                  mode))]
+    [(regexp-match #rx"^(inout|in|out)[ \t]+(.+)$" trimmed)
+     => (lambda (m)
+          (define mode (string->symbol (cadr m)))
+          (values (list (make-inline-param mode (caddr m) source line))
+                  mode))]
+    [current-mode
+     (values (list (make-inline-param current-mode trimmed source line))
+             current-mode)]
+    [else
+     (error 'gnu-parser "invalid inline parameter: ~a" part)]))
+
+(define (parse-inline-params text source line)
+  (let loop ([parts (parse-paren-list text ".inline-function signature")]
+             [current-mode #f]
+             [out '()])
+    (match parts
+      ['() (reverse out)]
+      [(cons part rest)
+       (define-values (params next-mode)
+         (parse-inline-param-piece part current-mode source line))
+       (loop rest next-mode (append (reverse params) out))])))
+
+(define (parse-function-params text source line)
+  (parse-inline-params text source line))
+
+(define (inline-signature-complete? text)
+  (and (regexp-match? #rx"\\(" text)
+       (regexp-match? #rx"\\)" text)))
+
+(define (make-inline-function-items name signature-text source line pending-align close?)
+  (define params (parse-inline-params signature-text source line))
+  (define attrs0 (hash 'inline-only #t
+                       'inline-params params))
+  (define attrs (if pending-align
+                    (hash-set attrs0 'align pending-align)
+                    attrs0))
+  (append (if close?
+              (list (ast-directive 'end-function #f '() (loc source line)))
+              '())
+          (list (ast-directive 'function name attrs (loc source line)))))
+
+(define (parse-function-attrs text)
+  (for/fold ([attrs (hash)])
+            ([part (in-list (filter (lambda (s) (not (string=? s "")))
+                                    (regexp-split #rx"[ \t]+" (string-trim text))))])
+    (case (string->symbol (string-downcase part))
+      [(export) (hash-set attrs 'export #t)]
+      [else (error 'gnu-parser "invalid .function attribute: ~a" part)])))
+
+(define (split-function-attrs/signature text)
+  (define trimmed (string-trim text))
+  (define open-pos
+    (for/first ([i (in-range (string-length trimmed))]
+                #:when (char=? (string-ref trimmed i) #\())
+      i))
+  (if open-pos
+      (values (string-trim (substring trimmed 0 open-pos))
+              (string-trim (substring trimmed open-pos)))
+      (values trimmed "()")))
+
+(define (make-function-items name attrs-text signature-text source line pending-align)
+  (define params (parse-function-params signature-text source line))
+  (define attrs0 (hash-set (parse-function-attrs attrs-text)
+                           'function-params
+                           params))
+  (define attrs (if pending-align
+                    (hash-set attrs0 'align pending-align)
+                    attrs0))
+  (list (ast-directive 'function name attrs (loc source line))))
+
+(define (parse-function-start rest source line st)
+  (when (gnu-state-in-function? st)
+    (error 'gnu-parser ".function cannot start before .end"))
+  (define m (regexp-match managed-symbol-head-pattern rest))
+  (unless m
+    (error 'gnu-parser ".function needs a name"))
+  (define name (parse-managed-symbol-token (cadr m) "function"))
+  (define tail (string-trim (or (caddr m) "")))
+  (define-values (attrs-text signature-text) (split-function-attrs/signature tail))
+  (cond
+    [(inline-signature-complete? signature-text)
+     (values (make-function-items name attrs-text signature-text source line (gnu-state-pending-align st))
+             (struct-copy gnu-state st
+                          [in-function? #t]
+                          [current-function name]
+                          [pending-align #f]))]
+    [else
+     (values '()
+             (struct-copy gnu-state st
+                          [pending-align #f]
+                          [pending-function
+                           (list name attrs-text (list signature-text) line (gnu-state-pending-align st))]))]))
+
+(define (continue-function-signature text source line st)
+  (match (gnu-state-pending-function st)
+    [(list name attrs-text pieces start-line pending-align)
+     (define pieces* (append pieces (list text)))
+     (define signature-text (string-join pieces* " "))
+     (if (inline-signature-complete? signature-text)
+         (values (make-function-items name attrs-text signature-text source start-line pending-align)
+                 (struct-copy gnu-state st
+                              [in-function? #t]
+                              [current-function name]
+                              [pending-function #f]))
+         (values '()
+                 (struct-copy gnu-state st
+                              [pending-function
+                               (list name attrs-text pieces* start-line pending-align)])))]))
+
+(define (parse-inline-function-start rest source line st)
+  (define m (regexp-match managed-symbol-head-pattern rest))
+  (unless m
+    (error 'gnu-parser ".inline-function needs a name"))
+  (define name (parse-managed-symbol-token (cadr m) "inline function"))
+  (define signature-text (string-trim (or (caddr m) "()")))
+  (define close? (gnu-state-in-function? st))
+  (cond
+    [(inline-signature-complete? signature-text)
+     (values (make-inline-function-items name signature-text source line (gnu-state-pending-align st) close?)
+             (struct-copy gnu-state st
+                          [in-function? #t]
+                          [current-function name]
+                          [pending-align #f]))]
+    [else
+     (values (if close?
+                 (list (ast-directive 'end-function #f '() (loc source line)))
+                 '())
+             (struct-copy gnu-state st
+                          [in-function? #f]
+                          [current-function #f]
+                          [pending-align #f]
+                          [pending-inline-function
+                           (list name (list signature-text) line (gnu-state-pending-align st))]))]))
+
+(define (continue-inline-function-signature text source line st)
+  (match (gnu-state-pending-inline-function st)
+    [(list name pieces start-line pending-align)
+     (define pieces* (append pieces (list text)))
+     (define signature-text (string-join pieces* " "))
+     (if (inline-signature-complete? signature-text)
+         (values (make-inline-function-items name signature-text source start-line pending-align #f)
+                 (struct-copy gnu-state st
+                              [in-function? #t]
+                              [current-function name]
+                              [pending-inline-function #f]))
+         (values '()
+                 (struct-copy gnu-state st
+                              [pending-inline-function
+                               (list name pieces* start-line pending-align)])))]))
+
 (define (function-start-label? label st)
   (define local-label?
     (string-prefix? (symbol->string label) "."))
@@ -546,7 +811,7 @@
      (define parts (parse-token-list-after-directive rest))
      (when (null? parts)
        (error 'gnu-parser ".asmp.function needs a name"))
-     (define name (parse-symbol-token (car parts)))
+     (define name (parse-managed-symbol-token (car parts) "function"))
      (define attrs0 (parse-asmp-attrs (cdr parts)))
      (define attrs (if (gnu-state-pending-align st)
                        (hash-set attrs0 'align (gnu-state-pending-align st))
@@ -559,13 +824,36 @@
                           [in-function? #t]
                           [current-function name]
                           [pending-align #f]))]
+    ["function"
+     (parse-function-start rest source line st)]
+    ["inline-function"
+     (parse-inline-function-start rest source line st)]
     [(or "asmp.end_function" "asmp.end-function")
      (if (gnu-state-in-function? st)
          (values (list (ast-directive 'end-function #f '() (loc source line)))
                  (struct-copy gnu-state st [in-function? #f] [current-function #f]))
          (values '() st))]
-    ["asmp.inline"
-     (values (list (ast-directive 'inline (parse-symbol-token rest) '() (loc source line))) st)]
+    ["end"
+     (cond
+       [(gnu-state-pending-inline-function st)
+        (error 'gnu-parser ".end before closing .inline-function signature")]
+       [(gnu-state-in-function? st)
+        (values (list (ast-directive 'end-function #f '() (loc source line)))
+                (struct-copy gnu-state st [in-function? #f] [current-function #f]))]
+       [else (values '() st)])]
+    [(or "inline" "asmp.inline")
+     (define-values (target bindings) (parse-inline-call rest source line))
+     (values (list (ast-directive 'inline
+                                   target
+                                   bindings
+                                   (loc source line)))
+             st)]
+    ["call"
+     (parse-call-start rest source line st)]
+    ["return"
+     (values (list (ast-ins 'ret #f '() (loc source line))) st)]
+    ["clobber"
+     (values '() st)]
     ["asmp.extern"
      (define parts (parse-token-list-after-directive rest))
      (when (null? parts)
@@ -616,21 +904,35 @@
       (values '() state)
       (let* ([without-comment (strip-comment line-text)]
              [text (string-trim without-comment)])
-        (define-values (label-items rest state-after-labels)
-          (parse-label-prefix text source line-number state))
-        (cond
-          [(string=? rest "")
-           (values label-items state-after-labels)]
-          [(string-prefix? rest ".")
-           (define-values (directive-items state-after-directive)
-             (parse-directive rest source line-number state-after-labels))
-           (values (append label-items directive-items) state-after-directive)]
-          [else
-           (values (append label-items
-                           (list (parse-instruction-line rest source line-number)))
-                   state-after-labels)]))))
+        (if (gnu-state-pending-call state)
+            (continue-call text source line-number state)
+            (if (gnu-state-pending-function state)
+                (continue-function-signature text source line-number state)
+                (if (gnu-state-pending-inline-function state)
+                    (continue-inline-function-signature text source line-number state)
+            (let ()
+              (define-values (label-items rest state-after-labels)
+                (parse-label-prefix text source line-number state))
+              (cond
+                [(string=? rest "")
+                 (values label-items state-after-labels)]
+                [(string-prefix? rest ".")
+                 (define-values (directive-items state-after-directive)
+                   (parse-directive rest source line-number state-after-labels))
+                 (values (append label-items directive-items) state-after-directive)]
+                [else
+                 (values (append label-items
+                                 (list (parse-instruction-line rest source line-number)))
+                         state-after-labels)]))))))))
 
 (define (finish-gnu-state state source line-number)
-  (if (gnu-state-in-function? state)
-      (list (ast-directive 'end-function #f '() (loc source line-number)))
-      '()))
+  (cond
+    [(gnu-state-pending-call state)
+     (error 'gnu-parser "unterminated .call arguments")]
+    [(gnu-state-pending-function state)
+     (error 'gnu-parser "unterminated .function signature")]
+    [(gnu-state-pending-inline-function state)
+     (error 'gnu-parser "unterminated .inline-function signature")]
+    [(gnu-state-in-function? state)
+     (list (ast-directive 'end-function #f '() (loc source line-number)))]
+    [else '()]))

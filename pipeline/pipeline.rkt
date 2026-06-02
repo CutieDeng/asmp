@@ -96,6 +96,53 @@
 (define (run-pipeline-with-abi-info fn config abi-info-map)
   (run-regalloc-pipeline fn config #:abi-info-map abi-info-map))
 
+(define (debug-ref-byte-size ref)
+  (case (reg-ref-kind ref)
+    [(w s) 4]
+    [(x d) 8]
+    [(b) 1]
+    [(h) 2]
+    [(q v z) 16]
+    [else 8]))
+
+(define (debug-ref-name ref)
+  (format "~a.~a" (reg-ref-kind ref) (reg-ref-id ref)))
+
+(define (collect-debug-reg-views fn)
+  (define seen (make-hash))
+  (define views '())
+  (fn-for-each-block
+   fn
+   (lambda (block)
+     (for ([ins (in-pvector (basic-block-instructions block))])
+       (when (ast-ins? ins)
+         (define use-def (extract-use-def ins))
+         (for ([ref (in-list (append (use-def-flat-defs use-def)
+                                     (use-def-flat-uses use-def)))])
+           (define rid (reg-ref->reg-id ref))
+           (when (reg-id-virtual? rid)
+             (define name (debug-ref-name ref))
+             (define key (list rid name))
+             (unless (hash-ref seen key #f)
+               (hash-set! seen key #t)
+               (set! views
+                     (cons (hash 'reg rid
+                                 'name name
+                                 'byte-size (debug-ref-byte-size ref))
+                           views)))))))))
+  (reverse views))
+
+(define (attach-debug-reg-map fn alloc-result effective-abi iter)
+  (define records (fn-get-info fn 'debug-reg-maps '()))
+  (fn-set-info
+   fn
+   'debug-reg-maps
+   (append records
+           (list (hash 'iteration iter
+                       'allocation alloc-result
+                       'effective-abi effective-abi
+                       'views (collect-debug-reg-views fn))))))
+
 (define (run-regalloc-pipeline fn [config default-pipeline-config]
                                 #:abi-info-map [abi-info-map #f])
   ;; 0. 前端语义验证
@@ -141,6 +188,8 @@
         (allocate-all-registers mig #:abi effective-abi)))
     (define alloc-result (merge-alloc-results multi-result))
     (define spilled (alloc-result-spilled alloc-result))
+    (define current-fn/debug
+      (attach-debug-reg-map current-fn alloc-result effective-abi iter))
 
     (when debug?
       (printf "溢出寄存器: ~a\n" (pvector-length spilled)))
@@ -151,13 +200,13 @@
        (cond
          ;; 不允许溢出 - 返回错误
          [(not (spill-allowed? spill-cfg))
-          (pipeline-result current-fn liveness mig alloc-result multi-result
+          (pipeline-result current-fn/debug liveness mig alloc-result multi-result
                            (pvector-empty) 0 iter
                            (list (format "分配失败：需要溢出 ~a 个寄存器，但溢出被禁止"
                                          (pvector-length spilled))))]
          ;; 允许溢出 - 重写并重新分配
          [else
-          (define rewritten-fn (rewrite-function current-fn alloc-result
+          (define rewritten-fn (rewrite-function current-fn/debug alloc-result
                                                   #:abi effective-abi
                                                   #:abi-info-map abi-info-map))
           (loop rewritten-fn (add1 iter))])]
@@ -165,7 +214,7 @@
       ;; 无溢出 - 完成
       [else
        ;; 4. 重写虚拟寄存器为物理寄存器
-       (define rewritten-fn (rewrite-function current-fn alloc-result
+       (define rewritten-fn (rewrite-function current-fn/debug alloc-result
                                                #:abi effective-abi
                                                #:abi-info-map abi-info-map))
 

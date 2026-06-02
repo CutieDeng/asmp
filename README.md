@@ -83,6 +83,9 @@ racket cli/as.rkt -v example/001-basic.d
 | `--gnu` / `--apple` | 选择汇编语法（默认 GNU） |
 | `--stop-after=PHASE` | 在指定阶段停止（parse/validate/cfg/regalloc/emit） |
 | `--dump=INFO` | 调试输出（ast/cfg/liveness/interference/allocation） |
+| `-g`, `--debug-lines` | 生成源码行号和寄存器变量 DWARF 调试信息 |
+| `--debug-reg-map` | 在输出汇编中追加虚拟寄存器分配映射注释 |
+| `--cfi` | 生成调用帧展开信息，支持常见 `sp`/`fp` 栈帧 |
 | `--default-abi=ABI` | 未指定调用 ABI 时的兼容默认值（aapcs64/leaf/naked/auto） |
 | `--allow-spill` | 允许寄存器溢出 |
 | `--no-verify-save-load` | 跳过 save/load 验证 |
@@ -173,12 +176,12 @@ racket test/parser-test.rkt
 | 属性 | 说明 |
 |------|------|
 | `(abi <name>)` | 指定调用约定：`aapcs64`、`leaf`、`naked` |
+| `(inline-only)` | 仅作为 inline 模板使用，不作为独立函数输出 |
 
 **未实现的属性（仅解析，无实际功能）：**
 
 解析器允许任意属性语法，但以下属性**当前未实现**，会被静默忽略：
 
-- `(inline)` - 无内联优化功能
 - `(noinline)` - 无效果
 
 这些属性作为语法预留存在，未来版本可能实现。

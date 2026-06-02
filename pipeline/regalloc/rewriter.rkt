@@ -321,6 +321,7 @@
 
 (define (rewrite-with-spill ins result assignment coalesced spill-map loads-needed stores-needed abi
                             spill-strategy neon-spill-map sp-adjustment)
+  (define source-loc (ast-srcloc ins))
   ;; 临时寄存器池
   ;; GPR: x16, x17 (IP registers)
   ;; FPR: v16-v23 (caller-saved, not argument registers)
@@ -365,11 +366,11 @@
         (case spill-strategy
           [(neon-regs)
            (define neon-reg (ordered-map-ref neon-spill-map reg))
-           (make-neon-load-instruction temp neon-reg reg)]
+           (make-neon-load-instruction temp neon-reg reg source-loc)]
           [(fp-stack)
-           (make-load-instruction temp slot reg #t sp-adjustment)]
+           (make-load-instruction temp slot reg #t sp-adjustment source-loc)]
           [else
-           (make-load-instruction temp slot reg #f 0)]))
+           (make-load-instruction temp slot reg #f 0 source-loc)]))
       (pvector-cons-right r load-ins)))
 
   (define extended-assignment
@@ -388,14 +389,14 @@
       (case spill-strategy
         [(neon-regs)
          (define neon-reg (ordered-map-ref neon-spill-map reg))
-         (make-neon-store-instruction temp neon-reg reg)]
+         (make-neon-store-instruction temp neon-reg reg source-loc)]
         [(fp-stack)
-         (make-store-instruction temp slot reg #t sp-adjustment)]
+         (make-store-instruction temp slot reg #t sp-adjustment source-loc)]
         [else
-         (make-store-instruction temp slot reg #f 0)]))
+         (make-store-instruction temp slot reg #f 0 source-loc)]))
     (pvector-cons-right r store-ins)))
 
-(define (make-load-instruction temp-reg-num slot orig-reg use-fp? sp-adjustment)
+(define (make-load-instruction temp-reg-num slot orig-reg use-fp? sp-adjustment [loc no-srcloc])
   (define width (reg-id-width orig-reg))
   (define reg-kind (case (reg-id-class orig-reg)
                      [(gpr) (if (= width 32) 'w 'x)]
@@ -413,9 +414,9 @@
                  (ast-mem (ast-reg 'x base-reg #f #f #f #f no-srcloc)
                           (ast-imm offset no-srcloc)
                           'offset #f #f no-srcloc))
-           no-srcloc))
+           loc))
 
-(define (make-store-instruction temp-reg-num slot orig-reg use-fp? sp-adjustment)
+(define (make-store-instruction temp-reg-num slot orig-reg use-fp? sp-adjustment [loc no-srcloc])
   (define width (reg-id-width orig-reg))
   (define reg-kind (case (reg-id-class orig-reg)
                      [(gpr) (if (= width 32) 'w 'x)]
@@ -433,27 +434,27 @@
                  (ast-mem (ast-reg 'x base-reg #f #f #f #f no-srcloc)
                           (ast-imm offset no-srcloc)
                           'offset #f #f no-srcloc))
-           no-srcloc))
+           loc))
 
 ;; NEON spill: GPR -> NEON (fmov d, x)
-(define (make-neon-store-instruction temp-reg-num neon-reg-num orig-reg)
+(define (make-neon-store-instruction temp-reg-num neon-reg-num orig-reg [loc no-srcloc])
   (define width (reg-id-width orig-reg))
   (define src-kind (if (= width 32) 'w 'x))
   (define dst-kind (if (= width 32) 's 'd))
   (ast-ins 'fmov #f
            (list (ast-reg dst-kind neon-reg-num #f #f #f #f no-srcloc)
                  (ast-reg src-kind temp-reg-num #f #f #f #f no-srcloc))
-           no-srcloc))
+           loc))
 
 ;; NEON restore: NEON -> GPR (fmov x, d)
-(define (make-neon-load-instruction temp-reg-num neon-reg-num orig-reg)
+(define (make-neon-load-instruction temp-reg-num neon-reg-num orig-reg [loc no-srcloc])
   (define width (reg-id-width orig-reg))
   (define dst-kind (if (= width 32) 'w 'x))
   (define src-kind (if (= width 32) 's 'd))
   (ast-ins 'fmov #f
            (list (ast-reg dst-kind temp-reg-num #f #f #f #f no-srcloc)
                  (ast-reg src-kind neon-reg-num #f #f #f #f no-srcloc))
-           no-srcloc))
+           loc))
 
 ;; ============================================================
 ;; 寄存器替换

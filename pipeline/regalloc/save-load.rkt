@@ -80,6 +80,8 @@
 ;; SP 寄存器常量
 (define sp-reg (ast-reg 'x 'sp #f #f #f #f no-srcloc))
 
+(define current-generated-loc (make-parameter no-srcloc))
+
 ;; 构建物理寄存器
 (define (make-phys-reg kind num)
   (ast-reg kind num #f #f #f #f no-srcloc))
@@ -94,7 +96,7 @@
 
 ;; 构建指令
 (define (make-ins op operands)
-  (ast-ins op #f operands no-srcloc))
+  (ast-ins op #f operands (current-generated-loc)))
 
 ;; 按 class 过滤 reg-key 列表
 (define (filter-by-class class keys)
@@ -752,8 +754,9 @@
                 (= (car first-save) bb-val)
                 (= (cdr first-save) i)))
 
-         (generate-save-code result reg-keys slot-table
-                             total-size sve-slots is-first? config)]
+         (parameterize ([current-generated-loc (ast-srcloc ins)])
+           (generate-save-code result reg-keys slot-table
+                               total-size sve-slots is-first? config))]
 
         ;; load! 指令
         [(? ast-directive?)
@@ -765,8 +768,9 @@
          (define should-dealloc?
            (hash-ref load-locs (cons bb-val i) #f))
 
-         (generate-load-code result reg-keys slot-table
-                             total-size sve-slots should-dealloc? config)]
+         (parameterize ([current-generated-loc (ast-srcloc ins)])
+           (generate-load-code result reg-keys slot-table
+                               total-size sve-slots should-dealloc? config))]
 
         ;; 普通指令
         [_ (pvector-cons-right result ins)])))

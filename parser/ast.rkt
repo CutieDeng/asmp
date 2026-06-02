@@ -70,7 +70,7 @@
 (define directive-kind/c
   (or/c 'function 'end-function 'label 'section 'align 'global 'extern
         'ascii 'asciz 'byte 'byte2 'byte4 'byte8 'byte16 'byte32
-        'save! 'load! 'weak-mov 'inline))
+        'save! 'load! 'weak-mov 'inline 'call))
 
 ;; ============================================================
 ;; AST 结构 (所有节点携带 srcloc)

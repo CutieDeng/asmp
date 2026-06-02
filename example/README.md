@@ -36,6 +36,9 @@ clang /tmp/macos-hello.s -o /tmp/macos-hello
 # GNU 输入，独立 Linux AArch64 hello world (_start + syscall)
 racket cli/as.rkt --gnu-input -o /tmp/standalone-hello.s example/011-gnu-standalone-hello.asm
 clang -target aarch64-linux-gnu -c /tmp/standalone-hello.s -o /tmp/standalone-hello.o
+
+# GNU 输入版 deflate 阅读/语义讨论示例
+racket cli/as.rkt --gnu-input -o /tmp/deflate-fixed-fast.s example/013-deflate-fixed-fast.asm
 ```
 
 ## 语法概览
@@ -110,7 +113,7 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 (mnemonic operand1 operand2 ...)
 
 ;; 带移位
-(add x0 x1 x2 lsl 0)    ; add x0, x1, x2, LSL #0
+(add x0 x1 x2)          ; add x0, x1, x2
 
 ;; 条件分支 (后缀)
 (b.eq label)            ; beq label
@@ -135,6 +138,7 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 | `010-gnu-hello.asm` | GNU 输入前端 hello world 函数示例 |
 | `011-gnu-standalone-hello.asm` | GNU 输入前端独立 Linux AArch64 hello world |
 | `012-macos-standalone-hello.asm` | GNU 输入前端 macOS main + puts hello world |
+| `013-deflate-fixed-fast.asm` | GNU 输入版 fixed-Huffman deflate fast path |
 
 GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs/gnu-frontend-syntax.md)。
 
@@ -150,6 +154,6 @@ GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs
 
 ## 注意事项
 
-1. 带移位的算术指令需要显式指定 `lsl 0`
+1. 只有确实需要移位时才写 `lsl` / `lsr` 等移位操作
 2. 条件码作为后缀使用: `b.eq`, `b.gt` 等
 3. 虚拟寄存器格式: `x.name`, `w.name`

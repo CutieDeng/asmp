@@ -43,15 +43,19 @@
       (check-true (valid-asm-symbol? '_start))
       (check-true (valid-asm-symbol? 'foo123))
       (check-true (valid-asm-symbol? '__bar))
+      (check-true (valid-asm-symbol? 'foo.bar))
+      (check-true (valid-asm-symbol? 'hello-world))
+      (check-true (valid-asm-symbol? 'a.b$c-d))
       (check-true (valid-asm-symbol? 'A))
       (check-true (valid-asm-symbol? '_)))
 
     (test-case "不合法符号"
-      (check-false (valid-asm-symbol? 'drop-1))
       (check-false (valid-asm-symbol? "123abc"))
-      (check-false (valid-asm-symbol? 'foo.bar))
       (check-false (valid-asm-symbol? 'a+b))
-      (check-false (valid-asm-symbol? 'hello-world))
+      (check-false (valid-asm-symbol? 'a@b))
+      (check-false (valid-asm-symbol? 'a::b))
+      (check-false (valid-asm-symbol? 'a..b))
+      (check-false (valid-asm-symbol? 'a.-b))
       (check-false (valid-asm-symbol? "1"))))
 
    (test-suite
@@ -79,16 +83,17 @@
     "verify-symbol-names"
 
     (test-case "合法函数名"
-      (define fn (make-test-function 'valid_name))
-      (define errors (verify-symbol-names fn))
-      (check-true (pvector-empty? errors)))
+      (for ([name (in-list '(valid_name crypto.deflate.fast-v1 a.b$c-d))])
+        (define fn (make-test-function name))
+        (define errors (verify-symbol-names fn))
+        (check-true (pvector-empty? errors))))
 
     (test-case "不合法函数名"
-      (define fn (make-test-function 'drop-1))
+      (define fn (make-test-function 'a@b))
       (define errors (verify-symbol-names fn))
       (check-equal? (pvector-length errors) 1)
       (define err (pvector-ref errors 0))
-      (check-equal? (symbol-name-error-symbol err) 'drop-1)
+      (check-equal? (symbol-name-error-symbol err) 'a@b)
       (check-equal? (symbol-name-error-kind err) 'function)))))
 
 ;; ============================================================

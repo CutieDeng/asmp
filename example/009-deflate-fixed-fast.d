@@ -394,7 +394,7 @@
 (: label emit_match)
   (: inline df_write_len)
   (: inline df_write_dist)
-  (add x4 x4 x15 lsl 0)
+  (add x4 x4 x15)
   (b main_loop)
 
 (: label emit_literal)

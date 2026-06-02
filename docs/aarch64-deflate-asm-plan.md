@@ -18,7 +18,10 @@ kernels:
 
 ## Implemented deflate target
 
-`example/009-deflate-fixed-fast.d` adds a raw fixed-Huffman deflate fast path:
+`example/009-deflate-fixed-fast.d` adds a raw fixed-Huffman deflate fast path.
+`example/013-deflate-fixed-fast.asm` is the same bootstrap design written in the
+GNU input syntax for discussing frontend syntax and macro/compile-time
+semantics:
 
 - one final deflate block, `BFINAL=1`, `BTYPE=01`;
 - scalar AArch64 bit writer with LSB-first packing;
@@ -33,10 +36,28 @@ stress case because it exercises unaligned loads, bit-field operations,
 register-offset addressing, inlined helpers, many local labels, and a real
 stateful bitstream.
 
+The current implementation should stay simple until runtime correctness is
+locked down. In particular:
+
+- do not add static Huffman tables while the S-expression frontend lacks compact
+  data directives and label-indexed loads;
+- do not add lazy matching, chains, or skipped-byte reinsertion before the raw
+  one-candidate parser has a decoder-backed test;
+- keep bit-writer helpers as inline templates so helper bodies are not emitted
+  as duplicate standalone functions;
+- write helper state as `.inline-function` virtual formals and call helpers with
+  named-only `.inline helper (formal=actual, ...)` bindings, rather than
+  smuggling state through fixed physical registers;
+- avoid spelling identity shifts such as `lsl 0`; if the assembler requires one
+  for some form, that is an assembler gap to fix, not algorithm logic to copy.
+
 ## Algorithm roadmap
 
 1. Fixed-Huffman core
-   - Keep the current no-table implementation as a bootstrap target.
+   - Keep the current no-table implementation as the bootstrap target: it
+     avoids rodata lookup tables and keeps the emitted stream easy to audit.
+   - Keep helper snippets as inline templates, so the final object contains the
+     exported compressor rather than duplicate standalone helpers.
    - Add correctness tests against a deflate decoder once the full pipeline can
      run in this checkout.
 
@@ -62,12 +83,16 @@ Production-grade deflate will be much easier and faster after these assembler
 features land:
 
 - Data directives: `.byte`, `.byte2`, `.byte4`, `.byte8`, `.ascii`, `.section`,
-  label-addressable rodata, and alignment for static tables.
+  label-addressable rodata, and alignment for static tables in the
+  S-expression frontend. The GNU frontend can already preserve common scalar
+  data directives, but the `.d` source used by this kernel still lacks a compact
+  table notation.
 - Literal pools and constant materialization helpers for 32/64-bit immediates,
   addresses, and platform-specific relocations.
 - Parameterized macros or inline templates with explicit inputs, outputs, and
-  clobbers. The current `(: inline fn)` works, but bit-writer snippets have to
-  communicate through fixed physical registers.
+  clobbers. The current `.inline-function` plus named-only `.inline` calls avoid
+  duplicate helper emission and make state binding explicit; the next gap is
+  using the declared modes and clobbers for stronger compile-time checks.
 - Better alias modelling for common bit operations such as `ubfx`, immediate
   `lsl`/`lsr`, logical-immediate `and`, and instruction selection when several
   encodings share the same operand signature.

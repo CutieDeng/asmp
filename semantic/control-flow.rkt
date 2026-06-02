@@ -437,8 +437,8 @@
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]
-        ;; 保留 save!/load!/weak-mov/inline 指令在指令流中
-        [(ast-directive (or 'save! 'load! 'weak-mov 'inline) _ _ _)
+        ;; 保留 save!/load!/weak-mov/inline/call 指令在指令流中
+        [(ast-directive (or 'save! 'load! 'weak-mov 'inline 'call) _ _ _)
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]
@@ -965,18 +965,11 @@
    reason)        ; string - 错误原因
   #:transparent)
 
-;; 检查符号是否是合法的汇编符号名
-;; 规则：以字母或下划线开头，只包含字母、数字、下划线
+;; 检查托管函数符号是否是合法的 asmp 符号名。
+;; 规则：segment(.segment)*；segment 以字母或下划线开头，可包含字母、数字、_、$、-。
 (define (valid-asm-symbol? sym)
   (define str (if (symbol? sym) (symbol->string sym) sym))
-  (and (> (string-length str) 0)
-       (let ([first-char (string-ref str 0)])
-         (or (char-alphabetic? first-char)
-             (char=? first-char #\_)))
-       (for/and ([c (in-string str)])
-         (or (char-alphabetic? c)
-             (char-numeric? c)
-             (char=? c #\_)))))
+  (regexp-match? #rx"^[A-Za-z_][A-Za-z0-9_$-]*(\\.[A-Za-z_][A-Za-z0-9_$-]*)*$" str))
 
 ;; 将不合法的符号转换为合法符号
 ;; 规则：不合法字符替换为 _
@@ -1015,7 +1008,7 @@
                 fn-name
                 'function
                 #f
-                (format "函数名 '~a' 包含不合法字符 (只允许字母、数字、下划线，且不能以数字开头)"
+                (format "函数名 '~a' 不合法 (应为 segment(.segment)*，segment 以字母或下划线开头，可包含字母、数字、_、$、-)"
                         fn-name)))))
 
   ;; 检查局部标签 (这里只是警告，因为局部标签会被转换)

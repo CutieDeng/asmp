@@ -9,7 +9,9 @@
          "../semantic/inline.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
-         "../codegen/emit.rkt")
+         "../codegen/emit.rkt"
+         "../vendor/cutie-ftree/pvector.rkt"
+         (prefix-in cli: "../cli/as.rkt"))
 
 ;; ============================================================
 ;; GNU frontend tests
@@ -18,6 +20,7 @@
 (define-runtime-path gnu-basic-fixture "fixtures/gnu-basic.asm")
 (define-runtime-path standalone-hello-source "../example/011-gnu-standalone-hello.asm")
 (define-runtime-path macos-hello-source "../example/012-macos-standalone-hello.asm")
+(define-runtime-path deflate-asm-source "../example/013-deflate-fixed-fast.asm")
 
 (define (parse-gnu source #:validate? [validate? #t])
   (parse-string source
@@ -110,6 +113,293 @@ ASM
      (check-not-false (regexp-match? #rx"stp x29, x30, \\[sp, #-[0-9]+\\]!" rendered))
      (check-not-false (regexp-match? #rx"bl _puts" rendered))
      (check-not-false (regexp-match? #rx"ldp x29, x30, \\[sp\\], #[0-9]+" rendered)))
+
+   (test-case "-g emits assembler line debug directives"
+     (define results
+       (parse-string #<<ASM
+.asmp.function debug_lines abi=aapcs64 export
+entry:
+  mov x.tmp, x0
+  add x0, x.tmp, #1
+  ret
+.asmp.end_function
+ASM
+                     #:source "debug-input.asm"
+                     #:syntax 'gnu
+                     #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'debug_lines))
+     (define rendered
+       (parameterize ([current-emit-config
+                       (struct-copy emit-config default-emit-config
+                                    [emit-debug-info? #t])])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"\\.file 1 \"debug-input\\.asm\"" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 3 0\n    mov" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 4 0\n    add" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 5 0\n    ret" rendered)))
+
+   (test-case "-g emits a minimal DWARF compile unit for line lookup"
+     (define results
+       (parse-string #<<ASM
+.asmp.function debug_cu abi=aapcs64 export
+entry:
+  mov x.tmp, x0
+  add x0, x.tmp, #1
+  mov w.tmp32, #7
+  add w0, w.tmp32, #1
+  ret
+.asmp.end_function
+ASM
+                     #:source "debug-cu.asm"
+                     #:syntax 'gnu
+                     #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'debug_cu))
+     (define result (run-pipeline fn default-pipeline-config))
+     (define rendered
+       (parameterize ([cli:asm-syntax 'gnu]
+                      [cli:emit-debug-lines #t]
+                      [cli:emit-debug-reg-map #f]
+                      [cli:emit-cfi #f])
+         (cli:emit-stage-result-assembly
+          (cli:run-emit-stage (list result)))))
+     (check-not-false (regexp-match? #rx"\\.Lasmp_debug_text_begin:" rendered))
+     (check-not-false (regexp-match? #rx"\\.section \\.debug_abbrev" rendered))
+     (check-not-false (regexp-match? #rx"\\.section \\.debug_info" rendered))
+     (check-not-false (regexp-match? #rx"\\.short 29" rendered))
+     (check-not-false (regexp-match? #rx"\\.asciz \"debug-cu\\.asm\"" rendered))
+     (check-not-false (regexp-match? #rx"\\.asciz \"debug_cu\"" rendered))
+     (check-not-false (regexp-match? #rx"\\.asciz \"x\\.tmp\"" rendered))
+     (check-not-false (regexp-match? #rx"\\.asciz \"w\\.tmp32\"" rendered))
+     (check-false (regexp-match? #rx"\\.asciz \"x\\.tmp32\"" rendered)))
+
+   (test-case "-g maps inline call line to expanded entry"
+     (define results
+       (parse-string #<<ASM
+.inline-function bump2 (inout: x.value)
+entry:
+  add x.value, x.value, #1
+  add x.value, x.value, #2
+  .return
+.end
+
+.asmp.function inline_break abi=aapcs64 export
+entry:
+  mov x.value, x0
+  .inline bump2 (x.value=x.value)
+  mov x0, x.value
+  ret
+.asmp.end_function
+ASM
+                     #:source "debug-inline.asm"
+                     #:syntax 'gnu
+                     #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'inline_break))
+     (define rendered
+       (parameterize ([current-emit-config
+                       (struct-copy emit-config default-emit-config
+                                    [emit-debug-info? #t])])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"\\.loc 1 10 0\n    mov" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 11 0\n    add" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 4 0\n    add" rendered))
+     (check-not-false (regexp-match? #rx"\\.loc 1 12 0\n    mov" rendered)))
+
+   (test-case "--cfi tracks managed save/restore frames"
+     (define results (parse-file macos-hello-source #:syntax 'gnu #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define rendered
+       (compile-functions
+        (ok-items results)
+        (struct-copy emit-config default-emit-config
+                     [emit-cfi? #t])))
+     (check-not-false (regexp-match? #rx"\\.cfi_startproc" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_def_cfa sp, 0" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_def_cfa_offset 32" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_offset w29, -32" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_offset w30, -24" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_def_cfa w29, 32" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_restore w29" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_restore w30" rendered))
+     (check-not-false (regexp-match? #rx"\\.cfi_endproc" rendered)))
+
+   (test-case "GNU deflate example compiles through inline-only helpers"
+     (define results (parse-file deflate-asm-source #:syntax 'gnu #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'deflate_fixed_fast_aarch64_asm))
+     (check-not-false fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"\\.globl deflate_fixed_fast_aarch64_asm" rendered))
+     (check-false (regexp-match? #rx"^df_flush8:" rendered))
+     (check-not-false (regexp-match? #rx"ubfm w[0-9]+, w[0-9]+, #0, #14" rendered)))
+
+   (test-case "--debug-reg-map keeps pre-rewrite allocation records"
+     (define results (parse-file deflate-asm-source #:syntax 'gnu #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'deflate_fixed_fast_aarch64_asm))
+     (define result (run-pipeline fn default-pipeline-config))
+     (define rendered
+       (parameterize ([cli:asm-syntax 'gnu]
+                      [cli:emit-debug-reg-map #t]
+                      [cli:emit-debug-lines #f]
+                      [cli:emit-cfi #f])
+         (cli:emit-stage-result-assembly
+          (cli:run-emit-stage (list result)))))
+     (check-not-false (regexp-match? #rx"// asmp debug reg map: deflate_fixed_fast_aarch64_asm" rendered))
+     (check-not-false (regexp-match? #rx"// iteration 0:" rendered))
+     (check-not-false (regexp-match? #rx"x\\.out -> x[0-9]+" rendered))
+     (check-not-false (regexp-match? #rx"x\\.dst_base" rendered)))
+
+   (test-case ".inline-function calls are named-only"
+     (define good
+       (parse-gnu #<<ASM
+.inline-function copy (in: x.src, out: x.dst)
+entry:
+  mov x.dst, x.src
+  .return
+.end
+
+.asmp.function caller abi=aapcs64 export
+entry:
+  .inline copy (x.src=x0, x.dst=x1)
+  ret
+.asmp.end_function
+ASM
+                  ))
+     (check-equal? (parse-results-error-count good) 0)
+     (check-not-false (expand-inline-cfg (build-cfg (ok-items good))))
+     (check-equal? (parse-results-error-count (parse-gnu ".inline copy x.src=x0\n")) 1)
+     (check-equal? (parse-results-error-count (parse-gnu ".inline copy (x.src)\n")) 1))
+
+   (test-case ".inline-function binding set is checked"
+     (define (check-inline-error call rx)
+       (define results
+         (parse-gnu
+          (format #<<ASM
+.inline-function copy (in: x.src, out: x.dst)
+entry:
+  mov x.dst, x.src
+  .return
+.end
+
+.asmp.function caller abi=aapcs64 export
+entry:
+  ~a
+  ret
+.asmp.end_function
+ASM
+                  call)))
+       (check-equal? (parse-results-error-count results) 0)
+       (check-exn (lambda (e) (regexp-match? rx (exn-message e)))
+                  (lambda () (expand-inline-cfg (build-cfg (ok-items results))))))
+     (check-inline-error ".inline copy (x.src=x0)"
+                         #rx"缺少参数绑定")
+     (check-inline-error ".inline copy (x.src=x0, x.dst=x1, x.tmp=x2)"
+                         #rx"未声明参数")
+     (check-inline-error ".inline copy (x.src=x0, x.src=x1, x.dst=x2)"
+                         #rx"重复绑定参数"))
+
+   (test-case ".function and .call use named managed signatures"
+     (define results
+       (parse-gnu #<<ASM
+.function my-lib.hash-v1 (
+  in: x.src, x.pos,
+  out: w.hash
+)
+entry:
+  add w.hash, w.src, w.pos
+  ret
+.end
+
+.function crypto.deflate.main export (
+  in: x.buf,
+  out: w.result
+)
+entry:
+  mov x.i, #7
+  .call my-lib.hash-v1 (
+    x.src=x.buf,
+    x.pos=x.i,
+    w.hash=w.result
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define helper (cfg-get-function-by-name cfg 'my-lib.hash-v1))
+     (define main-fn (cfg-get-function-by-name cfg 'crypto.deflate.main))
+     (check-not-false helper)
+     (check-not-false main-fn)
+     (check-false (fn-get-info helper 'export #f))
+     (check-true (fn-get-info main-fn 'export #f))
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (string-join
+          (for/list ([fn (in-list (list helper main-fn))])
+            (emit-function/result (run-pipeline fn default-pipeline-config)))
+          "\n\n")))
+     (check-not-false (regexp-match? #rx"\"my-lib\\.hash-v1\":" rendered))
+     (check-not-false (regexp-match? #rx"\\.globl crypto\\.deflate\\.main" rendered))
+     (check-not-false (regexp-match? #rx"bl \"my-lib\\.hash-v1\"" rendered))
+     (check-not-false (regexp-match? #rx"Lmy_lib_hash_v1\\$entry:" rendered))
+     (check-not-false (regexp-match? #rx"Lcrypto_deflate_main\\$entry:" rendered))
+     (check-false (regexp-match? #rx"(^|\n)entry:" rendered)))
+
+   (test-case "multi-input parse lets .call find another module definition"
+     (define caller-path (make-temporary-file "asmp-caller-~a.asm"))
+     (define callee-path (make-temporary-file "asmp-callee-~a.asm"))
+     (call-with-output-file caller-path
+       (lambda (out)
+         (display #<<ASM
+.function app.main export (
+  out: x.result
+)
+entry:
+  .call lib.math.inc (x.value=x.result)
+  ret
+.end
+ASM
+                  out))
+       #:exists 'truncate/replace)
+     (call-with-output-file callee-path
+       (lambda (out)
+         (display #<<ASM
+.function lib.math.inc (
+  out: x.value
+)
+entry:
+  mov x.value, #1
+  ret
+.end
+ASM
+                  out))
+       #:exists 'truncate/replace)
+     (define parse-result
+       (parameterize ([cli:input-syntax 'gnu])
+         (cli:run-parse-stage/files
+          (list (path->string caller-path)
+                (path->string callee-path)))))
+     (check-true (pvector-empty? (cli:parse-stage-result-errors parse-result)))
+     (define cfg
+       (expand-inline-cfg
+        (build-cfg (cli:parse-stage-result-items parse-result) 'multi-test)))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"bl lib\\.math\\.inc" rendered)))
 
    (test-case ".asmp.function accepts whitespace-separated ABI attributes"
      (define results

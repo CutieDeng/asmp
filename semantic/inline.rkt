@@ -76,6 +76,14 @@
 
   bodies)
 
+(define (collect-function-attrs items)
+  (for/hash ([item (in-list items)]
+             #:when (and (ast-directive? item)
+                         (eq? (ast-directive-kind item) 'function)))
+    (values (ast-directive-name item)
+            (let ([args (ast-directive-args item)])
+              (if (hash? args) args (hash))))))
+
 (define (collect-local-label-map body rename-symbol)
   (for/hash ([item (in-list body)]
              #:when (and (ast-directive? item)
@@ -84,32 +92,182 @@
     (define old (ast-directive-name item))
     (values old (rename-symbol old))))
 
-(define (rewrite-reg reg rename-symbol)
-  (define rid (ast-reg-id reg))
-  (if (symbol? rid)
-      (struct-copy ast-reg reg [id (rename-symbol rid)])
-      reg))
+(define (gpr-kind? k)
+  (memq k '(x w)))
 
-(define (rewrite-operand op label-map rename-symbol)
+(define (adapt-bound-reg template actual)
+  (define template-kind (ast-reg-kind template))
+  (define actual-kind (ast-reg-kind actual))
+  (define kind
+    (if (and (gpr-kind? template-kind) (gpr-kind? actual-kind))
+        template-kind
+        actual-kind))
+  (struct-copy ast-reg template
+               [kind kind]
+               [id (ast-reg-id actual)]))
+
+(define (inline-binding-map bindings)
+  (for/hash ([binding (in-list bindings)])
+    (match binding
+      [(list (? ast-reg? formal) (? ast-reg? actual))
+       (values (ast-reg-id formal) actual)]
+      [_ (values #f #f)])))
+
+(define (formal-key reg)
+  (cons (ast-reg-kind reg) (ast-reg-id reg)))
+
+(define (validate-inline-bindings target params bindings loc)
+  (validate-named-bindings 'inline target params bindings loc))
+
+(define (validate-named-bindings form target params bindings loc)
+  (define param-keys
+    (for/list ([param (in-list params)])
+      (match param
+        [(list _ (? ast-reg? reg)) (formal-key reg)]
+        [_ (raise-inline-error loc "~a ~a 的参数签名非法: ~a" form target param)])))
+  (define param-set (list->set param-keys))
+  (define seen (mutable-set))
+  (for ([binding (in-list bindings)])
+    (match binding
+      [(list (? ast-reg? formal) (? ast-reg? actual))
+       (define key (formal-key formal))
+       (unless (set-member? param-set key)
+         (raise-inline-error loc "~a ~a 绑定了未声明参数: ~a"
+                             form
+                             target
+                             (ast->string formal)))
+       (when (set-member? seen key)
+         (raise-inline-error loc "~a ~a 重复绑定参数: ~a"
+                             form
+                             target
+                             (ast->string formal)))
+       (set-add! seen key)]
+      [_ (raise-inline-error loc "~a ~a 绑定格式非法: ~a" form target binding)]))
+  (for ([param (in-list params)]
+        [key (in-list param-keys)])
+    (unless (set-member? seen key)
+      (match param
+        [(list _ (? ast-reg? reg))
+         (raise-inline-error loc "~a ~a 缺少参数绑定: ~a"
+                             form
+                             target
+                             (ast->string reg))]))))
+
+(define (lookup-binding bindings formal)
+  (for/first ([binding (in-list bindings)]
+              #:when (match binding
+                       [(list (? ast-reg? f) _) (equal? (formal-key f) (formal-key formal))]
+                       [_ #f]))
+    (second binding)))
+
+(define (function-param-slots params loc)
+  (define next-gpr 0)
+  (for/list ([param (in-list params)])
+    (match param
+      [(list mode (? ast-reg? formal))
+       (unless (gpr-kind? (ast-reg-kind formal))
+         (raise-inline-error loc
+                             ".call currently supports GPR params only: ~a"
+                             (ast->string formal)))
+       (when (>= next-gpr 8)
+         (raise-inline-error loc ".call supports at most 8 GPR params for now"))
+       (define slot
+         (ast-reg (ast-reg-kind formal)
+                  next-gpr
+                  #f #f #f #f
+                  (ast-reg-loc formal)))
+       (set! next-gpr (add1 next-gpr))
+       (list mode formal slot)]
+      [_ (raise-inline-error loc "函数参数签名非法: ~a" param)])))
+
+(define (mov-ins dst src loc)
+  (ast-ins 'mov #f (list dst src) loc))
+
+(define (label-ins target loc)
+  (ast-label target #f loc))
+
+(define (call-slot-inputs slots bindings loc)
+  (for/list ([slot (in-list slots)]
+             #:when (memq (first slot) '(in inout)))
+    (define formal (second slot))
+    (define actual (lookup-binding bindings formal))
+    (define actual* (adapt-bound-reg formal actual))
+    (mov-ins (third slot) actual* loc)))
+
+(define (call-slot-outputs slots bindings loc)
+  (for/list ([slot (in-list slots)]
+             #:when (memq (first slot) '(out inout)))
+    (define formal (second slot))
+    (define actual (lookup-binding bindings formal))
+    (define actual* (adapt-bound-reg formal actual))
+    (mov-ins actual* (third slot) loc)))
+
+(define (function-entry-moves params loc)
+  (for/list ([slot (in-list (function-param-slots params loc))]
+             #:when (memq (first slot) '(in inout)))
+    (mov-ins (second slot) (third slot) loc)))
+
+(define (function-return-moves params loc)
+  (for/list ([slot (in-list (function-param-slots params loc))]
+             #:when (memq (first slot) '(out inout)))
+    (mov-ins (third slot) (second slot) loc)))
+
+(define (apply-function-boundary body attrs loc)
+  (define params (hash-ref attrs 'function-params #f))
+  (if (not params)
+      body
+      (append
+       (function-entry-moves params loc)
+       (apply append
+              (for/list ([item (in-list body)])
+                (match item
+                  [(ast-ins 'ret suffix operands ret-loc)
+                   (append (function-return-moves params ret-loc)
+                           (list (ast-ins 'ret suffix operands ret-loc)))]
+                  [_ (list item)]))))))
+
+(define (lower-call target attrs bindings loc)
+  (when (hash-ref attrs 'inline-only #f)
+    (raise-inline-error loc ".call target is inline-only; use .inline: ~a" target))
+  (define params (hash-ref attrs 'function-params #f))
+  (unless params
+    (raise-inline-error loc ".call target has no .function signature: ~a" target))
+  (validate-named-bindings 'call target params bindings loc)
+  (define slots (function-param-slots params loc))
+  (append
+   (call-slot-inputs slots bindings loc)
+   (list (ast-ins 'bl #f (list (label-ins target loc)) loc))
+   (call-slot-outputs slots bindings loc)))
+
+(define (rewrite-reg reg rename-symbol [bindings (hash)])
+  (define rid (ast-reg-id reg))
+  (cond
+    [(not (symbol? rid)) reg]
+    [(hash-ref bindings rid #f)
+     => (lambda (actual) (adapt-bound-reg reg actual))]
+    [else
+     (struct-copy ast-reg reg [id (rename-symbol rid)])]))
+
+(define (rewrite-operand op label-map rename-symbol [bindings (hash)])
   (match op
     [(? ast-reg? r)
-     (rewrite-reg r rename-symbol)]
+     (rewrite-reg r rename-symbol bindings)]
     [(ast-label name reloc loc)
      (ast-label (hash-ref label-map name name) reloc loc)]
     [(ast-mem base offset index-mode shift extend loc)
-     (ast-mem (rewrite-operand base label-map rename-symbol)
-              (and offset (rewrite-operand offset label-map rename-symbol))
+     (ast-mem (rewrite-operand base label-map rename-symbol bindings)
+              (and offset (rewrite-operand offset label-map rename-symbol bindings))
               index-mode
               shift
               extend
               loc)]
     [(ast-reglist regs loc)
      (ast-reglist
-      (map (lambda (r) (rewrite-operand r label-map rename-symbol)) regs)
+      (map (lambda (r) (rewrite-operand r label-map rename-symbol bindings)) regs)
       loc)]
     [_ op]))
 
-(define (rewrite-save-load-directive d rename-symbol)
+(define (rewrite-save-load-directive d rename-symbol [bindings (hash)])
   (define kind (ast-directive-kind d))
   (define name (ast-directive-name d))
   (define args (ast-directive-args d))
@@ -122,7 +280,7 @@
            'all
            (for/list ([r (in-list regs)])
              (if (ast-reg? r)
-                 (rewrite-reg r rename-symbol)
+                 (rewrite-reg r rename-symbol bindings)
                  r))))
      (ast-directive kind name (list regs* size-spec) loc)]
     [_ d]))
@@ -150,8 +308,18 @@
            (loop tail)
            (cons item (loop tail)))])))
 
+(define (with-inline-entry-loc items inline-loc)
+  (let loop ([rest items] [prefix '()])
+    (match rest
+      ['() (reverse prefix)]
+      [(cons (? ast-ins? ins) tail)
+       (append (reverse prefix)
+               (cons (struct-copy ast-ins ins [loc inline-loc]) tail))]
+      [(cons item tail)
+       (loop tail (cons item prefix))])))
+
 ;; 将一次 inline 实例化并重命名
-(define (instantiate-inline caller target body inline-loc fresh-id)
+(define (instantiate-inline caller target body inline-loc fresh-id [bindings '()])
   (define prefix
     (format "inl_~a_~a_~a"
             (sanitize-symbol-name caller)
@@ -162,6 +330,7 @@
   (define exit-label (string->symbol (format "~a__exit" prefix)))
 
   (define label-map (collect-local-label-map body rename-symbol))
+  (define bindings-map (inline-binding-map bindings))
 
   (define rewritten
     (for/fold ([out '()]) ([item (in-list body)])
@@ -174,19 +343,19 @@
           [(ast-ins mnem suffix operands loc)
            (list (ast-ins mnem
                           suffix
-                          (map (lambda (op) (rewrite-operand op label-map rename-symbol))
+                          (map (lambda (op) (rewrite-operand op label-map rename-symbol bindings-map))
                                operands)
                           loc))]
           [(ast-directive 'label name args loc)
            (list (ast-directive 'label (hash-ref label-map name name) args loc))]
           [(ast-directive (or 'save! 'load!) _ _ _)
-           (list (rewrite-save-load-directive item rename-symbol))]
+           (list (rewrite-save-load-directive item rename-symbol bindings-map))]
           [(ast-directive 'weak-mov name args loc)
            (match args
              [(list dst src)
               (list (ast-directive 'weak-mov name
-                                   (list (rewrite-reg dst rename-symbol)
-                                         (rewrite-reg src rename-symbol))
+                                   (list (rewrite-reg dst rename-symbol bindings-map)
+                                         (rewrite-reg src rename-symbol bindings-map))
                                    loc))]
              [_ (list item)])]
           [(ast-directive 'inline _ _ loc)
@@ -196,13 +365,16 @@
 
   ;; 统一追加出口标签，供被改写的 ret 跳转；末尾 ret 形成的
   ;; "b next_label; next_label:" 直接删除，避免 inline 生成空跳转。
-  (drop-branches-to-next-label
-   (append rewritten
-           (list (ast-directive 'label exit-label '() inline-loc)))))
+  (with-inline-entry-loc
+   (drop-branches-to-next-label
+    (append rewritten
+            (list (ast-directive 'label exit-label '() inline-loc))))
+   inline-loc))
 
 ;; 展开所有 (: inline target)
 (define (expand-inline-items items)
   (define function-bodies (collect-function-bodies items))
+  (define function-attrs (collect-function-attrs items))
   (define inline-counter 0)
 
   (define (next-inline-id)
@@ -213,7 +385,7 @@
     (for/fold ([out '()]) ([item (in-list body)])
       (define expanded
         (match item
-          [(ast-directive 'inline target _ loc)
+          [(ast-directive 'inline target bindings loc)
            (unless (symbol? target)
              (raise-inline-error loc "inline 目标必须是函数名符号"))
            (when (member target stack)
@@ -225,9 +397,20 @@
            (define target-body (hash-ref function-bodies target #f))
            (unless target-body
              (raise-inline-error loc "inline 目标函数不存在: ~a" target))
+           (define target-attrs (hash-ref function-attrs target (hash)))
+           (define target-params (hash-ref target-attrs 'inline-params #f))
+           (when target-params
+             (validate-inline-bindings target target-params bindings loc))
            (define expanded-target
              (expand-body target target-body (cons target stack)))
-           (instantiate-inline caller target expanded-target loc (next-inline-id))]
+           (instantiate-inline caller target expanded-target loc (next-inline-id) bindings)]
+          [(ast-directive 'call target bindings loc)
+           (unless (symbol? target)
+             (raise-inline-error loc ".call 目标必须是函数名符号"))
+           (define target-attrs (hash-ref function-attrs target #f))
+           (unless target-attrs
+             (raise-inline-error loc ".call 目标函数不存在: ~a" target))
+           (lower-call target target-attrs bindings loc)]
           [_ (list item)]))
       (append out expanded)))
 
@@ -235,27 +418,40 @@
   (define out-rev '())
   (define in-fn? #f)
   (define fn-name #f)
+  (define fn-loc no-srcloc)
   (define body-rev '())
 
   (for ([item (in-list items)])
     (cond
       [(not in-fn?)
        (match item
-         [(ast-directive 'function name _ _)
+         [(ast-directive 'function name attrs loc)
           (set! in-fn? #t)
           (set! fn-name name)
+          (set! fn-loc loc)
           (set! body-rev '())
-          (set! out-rev (cons item out-rev))]
+          (define item*
+            (if (and (hash? attrs) (hash-has-key? attrs 'function-params))
+                (struct-copy ast-directive item
+                             [args (hash-remove attrs 'function-params)])
+                item))
+          (set! out-rev (cons item* out-rev))]
          [_
           (set! out-rev (cons item out-rev))])]
       [else
        (match item
          [(ast-directive 'end-function _ _ loc)
           (define expanded (expand-body fn-name (reverse body-rev) (list fn-name)))
+          (define fn-attrs (hash-ref function-attrs fn-name (hash)))
+          (define expanded/boundary
+            (if (hash-ref fn-attrs 'inline-only #f)
+                expanded
+                (apply-function-boundary expanded fn-attrs fn-loc)))
           ;; reversed 视图中顺序应为: end, reverse(expanded), function, ...
-          (set! out-rev (cons item (append (reverse expanded) out-rev)))
+          (set! out-rev (cons item (append (reverse expanded/boundary) out-rev)))
           (set! in-fn? #f)
           (set! fn-name #f)
+          (set! fn-loc no-srcloc)
           (set! body-rev '())]
          [_
           (set! body-rev (cons item body-rev))])]))
@@ -272,11 +468,12 @@
 (define (cfg-has-inline? cfg)
   (for/or ([i (in-range (cfg-function-count cfg))])
     (define fn (cfg-get-function cfg i))
-    (for/or ([kv (in-ordered-map (asm-function-blocks fn))])
-      (define block (cdr kv))
-      (for/or ([ins (in-pvector (basic-block-instructions block))])
-        (and (ast-directive? ins)
-             (eq? (ast-directive-kind ins) 'inline))))))
+    (or (fn-get-info fn 'function-params #f)
+        (for/or ([kv (in-ordered-map (asm-function-blocks fn))])
+          (define block (cdr kv))
+          (for/or ([ins (in-pvector (basic-block-instructions block))])
+            (and (ast-directive? ins)
+                 (memq (ast-directive-kind ins) '(inline call))))))))
 
 (define internal-fn-info-keys '(max-internal-align))
 

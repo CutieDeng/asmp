@@ -62,6 +62,18 @@ add1:
 .asmp.end_function
 ```
 
+新的推荐写法是 `.function ... .end`。它不需要 `abi=...`，`export` 可选；签名描述托管调用接口，`.end` 只结束结构，不自动生成 `ret`：
+
+```asm
+.function math.add-one export (
+  inout: x.value
+)
+entry:
+  add x.value, x.value, #1
+  ret
+.end
+```
+
 函数自身不需要为了使用虚拟寄存器而声明 ABI；未声明时会使用内建 AArch64 分配策略。只有当你确实要约束某个函数“对外承诺保护哪些寄存器”时，才需要写 `abi=<name>`。
 
 外部调用可以单独声明 call ABI：
@@ -71,6 +83,84 @@ add1:
 ```
 
 如果外部调用没有单独 ABI，未知调用会按内建 AAPCS64 scratch 集保守处理。`--default-abi <name>` 仍可作为兼容选项，影响未指定 ABI 的未知/动态调用以及旧式函数 ABI 选择。
+
+## 内联模板
+
+`.inline-function` 可以把一段代码声明成只供内联使用的模板。模板体应该优先使用虚拟寄存器表达输入、输出和状态；没有写进签名的虚拟寄存器会被当作模板内部临时量，每次 inline 时自动改名，不需要在调用点手动绑定。
+
+```asm
+.inline-function flush8 (inout: x.out, x.bits, w.count)
+loop:
+  cmp w.count, #8
+  b.lt done
+  strb w.bits, [x.out]
+  add x.out, x.out, #1
+  ubfm x.bits, x.bits, #8, #63
+  sub w.count, w.count, #8
+  b loop
+done:
+  .return
+.end
+
+.asmp.function caller abi=aapcs64 export
+  mov x.out, x0
+  mov x.bits, #0
+  mov w.count, #0
+  .inline flush8 (x.out=x.out, x.bits=x.bits, w.count=w.count)
+  ret
+.asmp.end_function
+```
+
+调用点只允许具名绑定：每个实参都必须写成 `formal=actual`，不支持位置参数，也不会因为名字相同而隐式传入。绑定的左侧必须是模板签名里声明过的虚拟寄存器形参，右侧是当前调用点中的寄存器；少传、多传、重复传都会报错。`in` / `out` / `inout` 目前用于声明模板接口和检查绑定集合，调用语法本身一致。
+
+GPR 绑定按同一个虚拟名贯通 `x.` / `w.` 视图，例如把 `x.bits=x.acc` 绑定后，模板中的 `w.bits` 会落到同一个物理寄存器的 32-bit 视图。`.clobber flags` 这类声明目前只作为语法预留入口，后续可以接入更严格的标志/寄存器副作用检查。
+
+## 托管函数调用
+
+`.call` 调用同一次 asmp 构建图里能找到的 `.function` 定义，不需要 `.extern-function` 签名声明。调用点只允许 named binding，左侧是 callee 签名里的形参，右侧是 caller 当前作用域里的寄存器：
+
+```asm
+.function lib.hash.fast-v1 (
+  in: x.src, x.pos,
+  out: w.hash
+)
+entry:
+  add w.hash, w.src, w.pos
+  ret
+.end
+
+.function app.main export (
+  in: x.buf,
+  out: w.result
+)
+entry:
+  mov x.i, #7
+  .call lib.hash.fast-v1 (
+    x.src=x.buf,
+    x.pos=x.i,
+    w.hash=w.result
+  )
+  ret
+.end
+```
+
+`.call` 会按固定托管调用约定降低为入参 `mov`、`bl target`、出参 `mov`。当前最小实现支持最多 8 个 GPR 参数；`in` / `inout` 在调用前传入，`out` / `inout` 在返回后传回。找不到 `.function` 定义、少传、多传或重复绑定都会报错。直接调用 C/libc/未知外部符号仍使用原始 `bl symbol` 和物理 ABI 寄存器。
+
+命令行可以传入多个输入文件，asmp 会先合并构建图再解析 `.call` 目标：
+
+```bash
+racket cli/as.rkt --gnu-input -o out.s caller.asm callee.asm
+```
+
+托管函数名支持 dot namespace 和 `-` / `$`：
+
+```asm
+.function crypto.deflate.fast-v1 export ()
+  ret
+.end
+```
+
+函数名是可链接符号；普通 `entry:` / `loop:` / `done:` label 仍然只在当前函数内可见，后端会输出成函数作用域局部标签。不同函数可以重复使用 `entry:`，同一个函数内仍不应该重复定义同名 label。带 `-` 的函数符号会在输出汇编中按需 quote，以兼容 GNU/Apple assembler。
 
 ## 寄存器
 
@@ -130,6 +220,68 @@ racket cli/as.rkt --gnu-input --allow-sp-writes input.asm
 ```
 
 会被诊断的形式包括 `add/sub/mov sp, ...`，以及会更新基址的 `[sp, #imm]!` / `[sp], #imm` pre/post-index 寻址。读取 `sp` 是允许的，例如 `mov fp, sp`；固定偏移访问栈槽也是允许的，例如 `str x0, [sp, #16]`。
+
+## 调试与展开信息
+
+`-g` / `--debug-lines` 会在输出汇编中生成 `.file` / `.loc`，并追加一个最小 DWARF v4 compile unit。这样 GNU as 或 clang integrated assembler 会生成可被 GDB/LLDB 使用的 line table，调试器可以把机器码地址映射回 asmp `.asm` 源码行。为了让 LLDB/GDB 暴露寄存器变量，asmp 当前把这个 compile unit 标成 C11 调试语言；源码和 line table 仍然指向 `.asm` 文件。
+
+```bash
+racket cli/as.rkt -g --gnu-input -o out.s input.asm
+clang -target aarch64-linux-gnu -g -c out.s -o out.o
+```
+
+macOS/LLDB 下建议保留对象文件再链接，便于 `dsymutil` 生成 dSYM：
+
+```bash
+racket cli/as.rkt --gnu-input --apple -g --cfi -o out.s input.asm
+clang -target arm64-apple-macos11 -g -c out.s -o out.o
+clang -target arm64-apple-macos11 out.o -o app
+dsymutil app
+```
+
+inline 模板展开后的指令默认保留模板体自身的源码行号；每次展开块的第一条实际指令会映射到 `.inline ...` 调用行，所以可以在调用行设置断点并停到该次展开的入口。单步进入后，后续指令会回到模板体源码行。当前还不会生成 DWARF inline-call metadata，inline 调试表现为“调用行可断、模板体可单步”。
+
+`-g` 还会为已分配到物理寄存器的 asmp 虚拟寄存器生成 `DW_TAG_variable`，所以可以在断点处用调试器查看变量：
+
+```lldb
+(lldb) breakpoint set --file input.asm --line 42
+(lldb) run
+(lldb) frame variable
+(unsigned long) x.answer = 42
+(unsigned int) w.answer32 = 7
+```
+
+这些变量会尽量保留源码里出现过的寄存器视图：`w.name` 会显示为 32-bit 的 `asmp_u32`，`x.name` 会显示为 64-bit 的 `asmp_u64`。如果同一个虚拟寄存器在源码中同时以 `w.name` 和 `x.name` 使用，当前会把两个视图都列出来，而不是生成按 PC 范围切换的精确 location list。这些变量仍使用全函数范围的 `DW_OP_regN` 位置，适合把 asmp 虚拟名和当前物理寄存器值对上；发生 spill 的虚拟寄存器目前只会出现在 `--debug-reg-map` 注释里，不会生成可读取的 DWARF 变量。
+
+`--debug-reg-map` 会在输出汇编里追加注释，列出 asmp 虚拟寄存器在分配轮次中的去向：
+
+```bash
+racket cli/as.rkt --gnu-input -g --cfi --debug-reg-map -o out.s input.asm
+```
+
+输出形如：
+
+```asm
+// asmp debug reg map: fn
+// iteration 0:
+// allocated:
+//   x.out -> x4
+// coalesced:
+//   (none)
+// spilled:
+//   x.tmp
+// end asmp debug reg map
+```
+
+这个映射是给人读的完整分配摘要，会同时列出 allocated、coalesced 和 spilled；DWARF 变量目前只覆盖能解析到物理寄存器的位置。映射注释同样保留源码寄存器视图，所以 `w.name` 不会被显示成 `x.name`；如果源码确实使用了同一个虚拟寄存器的多个视图，会列出多个对应点。
+
+`--cfi` 会生成 `.cfi_startproc` / `.cfi_endproc`，并跟踪常见 AArch64 栈帧操作：`sub/add sp`、`stp/str` 保存 GPR、`ldp/ldr` 恢复 GPR、`mov fp, sp`。配合 `.asmp.save` / `.asmp.restore` 生成的栈帧，可以让调试器和 profiler 更可靠地做 backtrace：
+
+```bash
+racket cli/as.rkt -g --cfi --gnu-input -o out.s input.asm
+```
+
+`--dump=ast,cfg,liveness,interference,allocation` 是 asmp 内部诊断输出，用来调 parser、CFG 和寄存器分配；它不是 GDB/LLDB 使用的调试信息。
 
 ## 操作数
 
@@ -223,11 +375,11 @@ label:
 
 `.word` 仅作为 GNU 兼容输入别名接受，并会规范化为 `.byte4`；新代码请使用显式宽度。`.byte*` 不接收字符串字面量，字符串数据请使用 `.ascii` / `.asciz`。暂不做完整 GNU 表达式求值，复杂表达式会尽量保留为符号/relocation 或报错。下面这些目前不是稳定接口：
 
-- `.cfi_*` 调试/展开信息；
+- 输入中的手写 `.cfi_*` 透传；
 - 宏、条件汇编、复杂表达式求值；
 - 更复杂的 section flag/type 组合。
 
-`.cfi_*` 的作用是给调试器、异常展开器和栈回溯工具描述调用帧如何恢复，例如返回地址保存在何处、CFA 如何随 `sp`/`fp` 改变。它不影响普通指令语义，也不是当前 asmp 编写内核或压缩例程的必要条件。后续若支持，优先级应是保真透传已有 GNU 输入，或由 `.asmp.save` / `.asmp.restore` 有限生成常见帧信息，而不是先实现完整 GAS CFI 表达式系统。
+输入中的手写 `.cfi_*` 仍然不做完整 GAS 兼容解析；新代码请优先使用 `--cfi` 让 asmp 根据托管栈帧生成展开信息。
 
 ## Hello World
 

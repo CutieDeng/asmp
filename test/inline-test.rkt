@@ -159,7 +159,7 @@
     (check-pred (lambda (s) (asm-contains? s "Lcaller\\$inl_caller_callee")) asm
                 "应生成带有前缀的内联标签"))
 
-  (test-case "ret 变换为跳转到出口标签"
+  (test-case "末尾 ret 的 inline 出口跳转可省略"
     (define source "
 (: function callee)
 (: label entry)
@@ -175,9 +175,11 @@
 (: end-function)
 ")
     (define asm (compile-to-asm source))
-    ;; callee 的 ret 应该被变换为 b 出口标签
-    (check-pred (lambda (s) (asm-contains? s "b Lcaller\\$inl_caller_callee_1__exit")) asm
-                "ret 应变换为跳转到出口标签"))
+    ;; callee 末尾 ret 的出口标签紧随其后时，可以直接 fall through。
+    (check-pred (lambda (s) (asm-not-contains? s "b Lcaller\\$inl_caller_callee_1__exit")) asm
+                "末尾 ret 不应生成跳到下一标签的空跳转")
+    (check-pred (lambda (s) (asm-contains? s "Lcaller\\$inl_caller_callee_1__exit:")) asm
+                "inline 出口标签仍应保留"))
 
   (test-case "branch to label colocated with inline call"
     (define source "

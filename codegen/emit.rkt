@@ -24,6 +24,12 @@
   default-emit-config
   apple-emit-config
   current-emit-config  ; 参数化配置
+  make-debug-file-state
+  current-debug-file-state
+  call-with-fresh-debug-file-state
+  emit-debug-text-begin
+  emit-debug-text-end
+  emit-debug-dwarf-footer
 
   ;; 单元素输出 (返回字符串，兼容旧 API)
   emit-reg            ; ast-reg → string
@@ -94,6 +100,44 @@
 ;; 当前配置 (参数化)
 (define current-emit-config (make-parameter default-emit-config))
 
+;; .file/.loc emission state. A module should share one state so every source
+;; file gets one stable numeric id across all emitted functions.
+(struct debug-variable
+  (name byte-size dwarf-reg)
+  #:transparent)
+
+(struct debug-variable-spec
+  (reg name byte-size)
+  #:transparent)
+
+(struct debug-function
+  (name low-label high-label variables)
+  #:transparent)
+
+(struct debug-file-state
+  (source->id next-id last-loc functions)
+  #:mutable
+  #:transparent)
+
+(define (make-debug-file-state)
+  (debug-file-state (make-hash) 1 #f '()))
+
+(define current-debug-file-state (make-parameter #f))
+
+(define (call-with-fresh-debug-file-state thunk)
+  (parameterize ([current-debug-file-state (make-debug-file-state)])
+    (thunk)))
+
+(struct cfi-state
+  (sp-offset cfa-reg cfa-offset)
+  #:mutable
+  #:transparent)
+
+(define (make-cfi-state)
+  (cfi-state 0 #f 0))
+
+(define current-cfi-state (make-parameter #f))
+
 ;; ============================================================
 ;; 缓存的字符串常量
 ;; ============================================================
@@ -110,6 +154,17 @@
     [(gnu) "//"]
     [else (string (emit-config-comment-char config))]))
 
+(define (asm-symbol-token name [prefix ""])
+  (define raw (string-append prefix (if (symbol? name) (symbol->string name) (~a name))))
+  (if (regexp-match? #rx"^[A-Za-z_.$][A-Za-z0-9_.$]*$" raw)
+      raw
+      (let ([out (open-output-string)])
+        (write raw out)
+        (get-output-string out))))
+
+(define (emit-asm-symbol/port name port [prefix ""])
+  (port-write-string port (asm-symbol-token name prefix)))
+
 ;; ============================================================
 ;; 端口输出辅助函数
 ;; ============================================================
@@ -122,6 +177,582 @@
 
 (define-syntax-rule (port-display port v)
   (display v port))
+
+(define (valid-debug-loc? loc)
+  (and (srcloc? loc)
+       (srcloc-source loc)
+       (integer? (srcloc-line loc))
+       (positive? (srcloc-line loc))))
+
+(define (debug-source->string src)
+  (cond
+    [(path? src) (path->string src)]
+    [(symbol? src) (symbol->string src)]
+    [else (~a src)]))
+
+(define (debug-loc-column loc)
+  (define col (srcloc-column loc))
+  (if (and (integer? col) (>= col 0)) col 0))
+
+(define (debug-file-id/emit source port)
+  (define state (current-debug-file-state))
+  (unless state
+    (error 'emit-debug-loc "debug file state is not initialized"))
+  (define source-key (debug-source->string source))
+  (hash-ref
+   (debug-file-state-source->id state)
+   source-key
+   (lambda ()
+     (define id (debug-file-state-next-id state))
+     (hash-set! (debug-file-state-source->id state) source-key id)
+     (set-debug-file-state-next-id! state (add1 id))
+     (port-write-string port ".file ")
+     (port-display port id)
+     (port-write-string port " ")
+     (write source-key port)
+     (port-newline port)
+     id)))
+
+(define (debug-state-has-files? state)
+  (and state
+       (not (zero? (hash-count (debug-file-state-source->id state))))))
+
+(define (debug-primary-source state)
+  (define pairs (hash->list (debug-file-state-source->id state)))
+  (car (car (sort pairs < #:key cdr))))
+
+(define (debug-current-comp-dir)
+  (path->string (simplify-path (current-directory))))
+
+(define (debug-label-base)
+  (case (emit-config-syntax (current-emit-config))
+    [(gnu) ".Lasmp_debug"]
+    [else "Lasmp_debug"]))
+
+(define (debug-text-begin-label)
+  (string-append (debug-label-base) "_text_begin"))
+
+(define (debug-text-end-label)
+  (string-append (debug-label-base) "_text_end"))
+
+(define (debug-function-end-label fn-name)
+  (format "~a_func_~a_end" (debug-label-base) (sanitize-symbol fn-name)))
+
+(define (debug-info-start-label)
+  (string-append (debug-label-base) "_info_start"))
+
+(define (debug-info-end-label)
+  (string-append (debug-label-base) "_info_end"))
+
+(define (debug-info-section-label)
+  (string-append (debug-label-base) "_info_section"))
+
+(define (debug-u64-type-label)
+  (string-append (debug-label-base) "_type_u64"))
+
+(define (debug-u32-type-label)
+  (string-append (debug-label-base) "_type_u32"))
+
+(define (debug-reg-id->name r)
+  (define prefix
+    (case (reg-id-class r)
+      [(gpr) (if (<= (reg-id-width r) 32) "w" "x")]
+      [(fpr) (case (reg-id-width r)
+               [(8) "b"]
+               [(16) "h"]
+               [(32) "s"]
+               [(64) "d"]
+               [else "q"])]
+      [(predicate) "p"]
+      [else "?"]))
+  (if (reg-id-virtual? r)
+      (format "~a.~a" prefix (reg-id-id r))
+      (format "~a~a" prefix (reg-id-id r))))
+
+(define (debug-alloc-record-empty? record)
+  (define alloc (hash-ref record 'allocation #f))
+  (or (not alloc)
+      (and (ordered-map-empty? (alloc-result-assignment alloc))
+           (ordered-map-empty? (alloc-result-coalesced alloc))
+           (= (pvector-length (alloc-result-spilled alloc)) 0))))
+
+(define (debug-allocation-records fn)
+  (define records (fn-get-info fn 'debug-reg-maps '()))
+  (define non-empty
+    (filter (lambda (record) (not (debug-alloc-record-empty? record)))
+            records))
+  (if (null? non-empty) records non-empty))
+
+(define (debug-resolve-coalesced reg coalesced)
+  (let loop ([r reg] [seen (set)])
+    (cond
+      [(set-member? seen r) r]
+      [(ordered-map-ref coalesced r #f)
+       => (lambda (next) (loop next (set-add seen r)))]
+      [else r])))
+
+(define (debug-register-byte-size reg)
+  (case (reg-id-class reg)
+    [(gpr) (if (<= (reg-id-width reg) 32) 4 8)]
+    [(fpr) (case (reg-id-width reg)
+             [(8) 1]
+             [(16) 2]
+             [(32) 4]
+             [(64) 8]
+             [else 16])]
+    [else #f]))
+
+(define (debug-dwarf-reg-number reg phys)
+  (case (reg-id-class reg)
+    [(gpr) phys]
+    [(fpr) (+ 64 phys)]
+    [else #f]))
+
+(define (debug-record-view-specs record)
+  (for/list ([view (in-list (hash-ref record 'views '()))])
+    (debug-variable-spec (hash-ref view 'reg)
+                         (hash-ref view 'name)
+                         (hash-ref view 'byte-size))))
+
+(define (debug-fallback-variable-specs alloc)
+  (define assignment (alloc-result-assignment alloc))
+  (define coalesced (alloc-result-coalesced alloc))
+  (define assigned-regs
+    (for/list ([kv (in-ordered-map assignment)]
+               #:when (reg-id-virtual? (car kv)))
+      (car kv)))
+  (define coalesced-regs
+    (for/list ([kv (in-ordered-map coalesced)]
+               #:when (reg-id-virtual? (car kv)))
+      (car kv)))
+  (define candidate-regs
+    (remove-duplicates (append assigned-regs coalesced-regs)))
+  (for/list ([reg (in-list candidate-regs)])
+    (debug-variable-spec reg
+                         (debug-reg-id->name reg)
+                         (or (debug-register-byte-size reg) 8))))
+
+(define (debug-variable-specs record alloc)
+  (define view-specs (debug-record-view-specs record))
+  (define view-names
+    (for/set ([spec (in-list view-specs)])
+      (debug-variable-spec-name spec)))
+  (define view-regs
+    (for/set ([spec (in-list view-specs)])
+      (debug-variable-spec-reg spec)))
+  (append
+   view-specs
+   (for/list ([spec (in-list (debug-fallback-variable-specs alloc))]
+              #:unless (or (set-member? view-regs (debug-variable-spec-reg spec))
+                            (set-member? view-names (debug-variable-spec-name spec))))
+     spec)))
+
+(define (debug-record->variables record)
+  (define alloc (hash-ref record 'allocation #f))
+  (define abi (hash-ref record 'effective-abi #f))
+  (if (and alloc abi)
+      (let* ([assignment (alloc-result-assignment alloc)]
+             [coalesced (alloc-result-coalesced alloc)]
+             [specs (debug-variable-specs record alloc)])
+        (filter
+         values
+         (for/list ([spec (in-list specs)])
+           (define reg (debug-variable-spec-reg spec))
+           (define resolved (debug-resolve-coalesced reg coalesced))
+           (define color
+             (cond
+               [(reg-id-physical? resolved)
+                (abi-reg->color abi (reg-id-class resolved) (reg-id-id resolved))]
+               [else
+                (ordered-map-ref assignment resolved #f)]))
+           (define phys
+             (and color
+                  (abi-color->reg abi (reg-id-class resolved) color)))
+           (define dwarf-reg
+             (and phys (debug-dwarf-reg-number reg phys)))
+           (and dwarf-reg
+                (debug-variable (debug-variable-spec-name spec)
+                                (debug-variable-spec-byte-size spec)
+                                dwarf-reg)))))
+      '()))
+
+(define (debug-register-function!/port fn low-label high-label port)
+  (define state (current-debug-file-state))
+  (when (and state
+             (emit-config-emit-debug-info? (current-emit-config)))
+    (define new-vars
+      (append-map debug-record->variables
+                  (debug-allocation-records fn)))
+    (define deduped
+      (for/fold ([vars '()]
+                 [names (set)]
+                 #:result (reverse vars))
+                ([var (in-list new-vars)])
+        (define name (debug-variable-name var))
+        (if (set-member? names name)
+            (values vars names)
+            (values (cons var vars) (set-add names name)))))
+    (set-debug-file-state-functions!
+     state
+     (append (debug-file-state-functions state)
+             (list (debug-function (symbol->string (asm-function-name fn))
+                                   low-label
+                                   high-label
+                                   deduped))))))
+
+(define (emit-debug-section/port name port)
+  (case (emit-config-syntax (current-emit-config))
+    [(apple)
+     (port-write-string port ".section __DWARF,__")
+     (port-write-string port name)
+     (port-write-string port ",regular,debug")]
+    [else
+     (port-write-string port ".section .")
+     (port-write-string port name)])
+  (port-newline port))
+
+(define (emit-asm-directive/port directive value port)
+  (port-write-string port directive)
+  (port-write-string port " ")
+  (port-display port value)
+  (port-newline port))
+
+(define (emit-asm-string-directive/port directive value port)
+  (port-write-string port directive)
+  (port-write-string port " ")
+  (write value port)
+  (port-newline port))
+
+(define (emit-asm-label/port label port)
+  (port-write-string port label)
+  (port-write-string port ":")
+  (port-newline port))
+
+(define (emit-dwarf-attr/port attr form port)
+  (emit-asm-directive/port ".byte" attr port)
+  (emit-asm-directive/port ".byte" form port))
+
+(define (emit-dwarf-abbrev/port code tag children? attrs port)
+  (emit-asm-directive/port ".byte" code port)
+  (emit-asm-directive/port ".byte" tag port)
+  (emit-asm-directive/port ".byte" (if children? 1 0) port)
+  (for ([attr (in-list attrs)])
+    (emit-dwarf-attr/port (car attr) (cdr attr) port))
+  (emit-asm-directive/port ".byte" 0 port)
+  (emit-asm-directive/port ".byte" 0 port))
+
+(define (emit-debug-ref4/port target-label port)
+  (port-write-string port ".long ")
+  (port-write-string port target-label)
+  (port-write-string port "-")
+  (port-write-string port (debug-info-section-label))
+  (port-newline port))
+
+(define (emit-debug-exprloc-reg/port dwarf-reg port)
+  (cond
+    [(<= 0 dwarf-reg 31)
+     (emit-asm-directive/port ".byte" 1 port)
+     (emit-asm-directive/port ".byte" (+ #x50 dwarf-reg) port)]
+    [else
+     (emit-asm-directive/port ".byte" 2 port)
+     (emit-asm-directive/port ".byte" #x90 port)
+     (emit-asm-directive/port ".uleb128" dwarf-reg port)]))
+
+(define (debug-variable-type-label var)
+  (if (<= (debug-variable-byte-size var) 4)
+      (debug-u32-type-label)
+      (debug-u64-type-label)))
+
+(define (emit-debug-text-label/port label port)
+  (when (emit-config-emit-debug-info? (current-emit-config))
+    (port-write-string port label)
+    (port-write-string port ":")
+    (port-newline port)))
+
+(define (emit-debug-text-begin/port port)
+  (emit-debug-text-label/port (debug-text-begin-label) port))
+
+(define (emit-debug-text-end/port port)
+  (emit-debug-text-label/port (debug-text-end-label) port))
+
+(define (emit-debug-text-begin)
+  (define out (open-output-string))
+  (emit-debug-text-begin/port out)
+  (get-output-string out))
+
+(define (emit-debug-text-end)
+  (define out (open-output-string))
+  (emit-debug-text-end/port out)
+  (get-output-string out))
+
+(define (emit-debug-dwarf-footer/port port)
+  (define config (current-emit-config))
+  (define state (current-debug-file-state))
+  (when (and (emit-config-emit-debug-info? config)
+             (debug-state-has-files? state))
+    (define primary-source (debug-primary-source state))
+    (define comp-dir (debug-current-comp-dir))
+    (define info-start (debug-info-start-label))
+    (define info-end (debug-info-end-label))
+    (define text-begin (debug-text-begin-label))
+    (define text-end (debug-text-end-label))
+
+    ;; Minimal DWARF v4 compile unit. The assembler emits .debug_line from
+    ;; .file/.loc; this CU gives debuggers a DIE that points at that line table.
+    ;; Virtual registers with stable physical-register assignments are exported
+    ;; as whole-text DW_TAG_variable entries. This is intentionally coarse; it
+    ;; makes the current mapping inspectable without pretending to have precise
+    ;; per-instruction location lists.
+    (define info-section (debug-info-section-label))
+    (define u64-type (debug-u64-type-label))
+    (define u32-type (debug-u32-type-label))
+    (define functions
+      (let ([registered (debug-file-state-functions state)])
+        (if (null? registered)
+            (list (debug-function "asmp_text" text-begin text-end '()))
+            registered)))
+
+    (port-newline port)
+    (emit-debug-section/port "debug_abbrev" port)
+    (emit-dwarf-abbrev/port
+     1 17 #t
+     (list (cons 37 8)    ; DW_AT_producer, DW_FORM_string
+           (cons 19 5)    ; DW_AT_language, DW_FORM_data2
+           (cons 3 8)     ; DW_AT_name, DW_FORM_string
+           (cons 27 8)    ; DW_AT_comp_dir, DW_FORM_string
+           (cons 16 23)   ; DW_AT_stmt_list, DW_FORM_sec_offset
+           (cons 17 1)    ; DW_AT_low_pc, DW_FORM_addr
+           (cons 18 1))   ; DW_AT_high_pc, DW_FORM_addr
+     port)
+    (emit-dwarf-abbrev/port
+     2 36 #f
+     (list (cons 3 8)     ; DW_AT_name, DW_FORM_string
+           (cons 62 11)   ; DW_AT_encoding, DW_FORM_data1
+           (cons 11 11))  ; DW_AT_byte_size, DW_FORM_data1
+     port)
+    (emit-dwarf-abbrev/port
+     3 46 #t
+     (list (cons 3 8)     ; DW_AT_name, DW_FORM_string
+           (cons 17 1)    ; DW_AT_low_pc, DW_FORM_addr
+           (cons 18 1)    ; DW_AT_high_pc, DW_FORM_addr
+           (cons 64 24))  ; DW_AT_frame_base, DW_FORM_exprloc
+     port)
+    (emit-dwarf-abbrev/port
+     4 52 #f
+     (list (cons 3 8)     ; DW_AT_name, DW_FORM_string
+           (cons 73 19)   ; DW_AT_type, DW_FORM_ref4
+           (cons 2 24))   ; DW_AT_location, DW_FORM_exprloc
+     port)
+    (emit-asm-directive/port ".byte" 0 port)
+
+    (emit-debug-section/port "debug_info" port)
+    (emit-asm-label/port info-section port)
+    (port-write-string port ".long ")
+    (port-write-string port info-end)
+    (port-write-string port "-")
+    (port-write-string port info-start)
+    (port-newline port)
+    (emit-asm-label/port info-start port)
+    (emit-asm-directive/port ".short" 4 port)
+    (emit-asm-directive/port ".long" 0 port)
+    (emit-asm-directive/port ".byte" 8 port)
+    (emit-asm-directive/port ".byte" 1 port)
+    (emit-asm-string-directive/port ".asciz" "asmp" port)
+    ;; LLDB treats DW_LANG_Mips_Assembler as line-only assembly and does not
+    ;; surface local variables. C11 keeps source line support while allowing
+    ;; register-backed asmp virtual variables to show up in `frame variable`.
+    (emit-asm-directive/port ".short" 29 port)
+    (emit-asm-string-directive/port ".asciz" primary-source port)
+    (emit-asm-string-directive/port ".asciz" comp-dir port)
+    (emit-asm-directive/port ".long" 0 port)
+    (emit-asm-directive/port ".quad" text-begin port)
+    (emit-asm-directive/port ".quad" text-end port)
+
+    (emit-asm-label/port u64-type port)
+    (emit-asm-directive/port ".byte" 2 port)
+    (emit-asm-string-directive/port ".asciz" "asmp_u64" port)
+    (emit-asm-directive/port ".byte" 7 port)
+    (emit-asm-directive/port ".byte" 8 port)
+
+    (emit-asm-label/port u32-type port)
+    (emit-asm-directive/port ".byte" 2 port)
+    (emit-asm-string-directive/port ".asciz" "asmp_u32" port)
+    (emit-asm-directive/port ".byte" 7 port)
+    (emit-asm-directive/port ".byte" 4 port)
+
+    (for ([fn (in-list functions)])
+      (emit-asm-directive/port ".byte" 3 port)
+      (emit-asm-string-directive/port ".asciz" (debug-function-name fn) port)
+      (emit-asm-directive/port ".quad" (debug-function-low-label fn) port)
+      (emit-asm-directive/port ".quad" (debug-function-high-label fn) port)
+      (emit-asm-directive/port ".byte" 1 port)
+      (emit-asm-directive/port ".byte" #x9c port)
+      (for ([var (in-list (debug-function-variables fn))])
+        (emit-asm-directive/port ".byte" 4 port)
+        (emit-asm-string-directive/port ".asciz" (debug-variable-name var) port)
+        (emit-debug-ref4/port (debug-variable-type-label var) port)
+        (emit-debug-exprloc-reg/port (debug-variable-dwarf-reg var) port))
+      (emit-asm-directive/port ".byte" 0 port))
+    (emit-asm-directive/port ".byte" 0 port)
+    (emit-asm-label/port info-end port)))
+
+(define (emit-debug-dwarf-footer)
+  (define out (open-output-string))
+  (emit-debug-dwarf-footer/port out)
+  (get-output-string out))
+
+(define (emit-debug-loc/port node port)
+  (define config (current-emit-config))
+  (when (emit-config-emit-debug-info? config)
+    (define loc (ast-srcloc node))
+    (when (valid-debug-loc? loc)
+      (define file-id (debug-file-id/emit (srcloc-source loc) port))
+      (define line (srcloc-line loc))
+      (define column (debug-loc-column loc))
+      (define loc-key (list file-id line column))
+      (define state (current-debug-file-state))
+      (unless (equal? loc-key (debug-file-state-last-loc state))
+        (set-debug-file-state-last-loc! state loc-key)
+        (port-write-string port ".loc ")
+        (port-display port file-id)
+        (port-write-string port " ")
+        (port-display port line)
+        (port-write-string port " ")
+        (port-display port column)
+        (port-newline port)))))
+
+(define (gpr-reg-num r)
+  (and (ast-reg? r)
+       (memq (ast-reg-kind r) '(x w))
+       (number? (ast-reg-id r))
+       (ast-reg-id r)))
+
+(define (sp-reg? r)
+  (and (ast-reg? r)
+       (eq? (ast-reg-kind r) 'x)
+       (eq? (ast-reg-id r) 'sp)))
+
+(define (cfi-reg-name reg)
+  (match reg
+    ['sp "sp"]
+    [(? number? n) (format "w~a" n)]))
+
+(define (emit-cfi-directive/port port directive . args)
+  (port-write-string port ".")
+  (port-write-string port directive)
+  (for ([arg (in-list args)]
+        [i (in-naturals)])
+    (if (= i 0)
+        (port-write-string port " ")
+        (port-write-string port ", "))
+    (port-display port arg))
+  (port-newline port))
+
+(define (emit-cfi-def-cfa/port reg offset port)
+  (define state (current-cfi-state))
+  (when (and state
+             (not (and (equal? reg (cfi-state-cfa-reg state))
+                       (= offset (cfi-state-cfa-offset state)))))
+    (set-cfi-state-cfa-reg! state reg)
+    (set-cfi-state-cfa-offset! state offset)
+    (emit-cfi-directive/port port "cfi_def_cfa" (cfi-reg-name reg) offset)))
+
+(define (emit-cfi-def-cfa-offset/port offset port)
+  (define state (current-cfi-state))
+  (when (and state
+             (eq? (cfi-state-cfa-reg state) 'sp)
+             (not (= offset (cfi-state-cfa-offset state))))
+    (set-cfi-state-cfa-offset! state offset)
+    (emit-cfi-directive/port port "cfi_def_cfa_offset" offset)))
+
+(define (emit-cfi-offset/port reg offset port)
+  (emit-cfi-directive/port port "cfi_offset" (cfi-reg-name reg) offset))
+
+(define (emit-cfi-restore/port reg port)
+  (emit-cfi-directive/port port "cfi_restore" (cfi-reg-name reg)))
+
+(define (imm-int op)
+  (and (ast-imm? op) (ast-imm-value op)))
+
+(define (sp-mem-offset mem)
+  (and (ast-mem? mem)
+       (sp-reg? (ast-mem-base mem))
+       (imm-int (ast-mem-offset mem))))
+
+(define (cfi-update-sp-offset!/port delta port)
+  (define state (current-cfi-state))
+  (when state
+    (define new-offset (+ (cfi-state-sp-offset state) delta))
+    (set-cfi-state-sp-offset! state new-offset)
+    (emit-cfi-def-cfa-offset/port (- new-offset) port)))
+
+(define (cfi-current-stack-slot-offset slot-offset)
+  (define state (current-cfi-state))
+  (+ (cfi-state-sp-offset state) slot-offset))
+
+(define (emit-cfi-saved-gpr/port reg slot-offset port)
+  (define n (gpr-reg-num reg))
+  (when n
+    (emit-cfi-offset/port n (cfi-current-stack-slot-offset slot-offset) port)))
+
+(define (emit-cfi-restore-gpr/port reg port)
+  (define n (gpr-reg-num reg))
+  (when n
+    (define state (current-cfi-state))
+    (when (and state (equal? n (cfi-state-cfa-reg state)))
+      (emit-cfi-def-cfa/port 'sp (- (cfi-state-sp-offset state)) port))
+    (emit-cfi-restore/port n port)))
+
+(define (emit-cfi-after-ins/port ins port)
+  (define config (current-emit-config))
+  (when (and (emit-config-emit-cfi? config)
+             (current-cfi-state)
+             (ast-ins? ins))
+    (match ins
+      [(ast-ins 'sub #f (list (? sp-reg?) (? sp-reg?) imm) _)
+       (define n (imm-int imm))
+       (when n (cfi-update-sp-offset!/port (- n) port))]
+      [(ast-ins 'add #f (list (? sp-reg?) (? sp-reg?) imm) _)
+       (define n (imm-int imm))
+       (when n (cfi-update-sp-offset!/port n port))]
+      [(ast-ins 'mov #f (list dst (? sp-reg?)) _)
+       (define dst-num (gpr-reg-num dst))
+       (when dst-num
+         (define state (current-cfi-state))
+         (emit-cfi-def-cfa/port dst-num (- (cfi-state-sp-offset state)) port))]
+      [(ast-ins 'stp #f (list r1 r2 mem) _)
+       (define off (sp-mem-offset mem))
+       (when off
+         (case (ast-mem-index-mode mem)
+           [(pre)
+            (cfi-update-sp-offset!/port off port)
+            (emit-cfi-saved-gpr/port r1 0 port)
+            (emit-cfi-saved-gpr/port r2 8 port)]
+           [(offset)
+            (emit-cfi-saved-gpr/port r1 off port)
+            (emit-cfi-saved-gpr/port r2 (+ off 8) port)]
+           [else (void)]))]
+      [(ast-ins 'str #f (list r mem) _)
+       (define off (sp-mem-offset mem))
+       (when (and off (eq? (ast-mem-index-mode mem) 'offset))
+         (emit-cfi-saved-gpr/port r off port))]
+      [(ast-ins 'ldp #f (list r1 r2 mem) _)
+       (define off (sp-mem-offset mem))
+       (when off
+         (case (ast-mem-index-mode mem)
+           [(post)
+            (cfi-update-sp-offset!/port off port)
+            (emit-cfi-restore-gpr/port r1 port)
+            (emit-cfi-restore-gpr/port r2 port)]
+           [(offset)
+            (emit-cfi-restore-gpr/port r1 port)
+            (emit-cfi-restore-gpr/port r2 port)]
+           [else (void)]))]
+      [(ast-ins 'ldr #f (list r mem) _)
+       (define off (sp-mem-offset mem))
+       (when (and off (eq? (ast-mem-index-mode mem) 'offset))
+         (emit-cfi-restore-gpr/port r port))]
+      [_ (void)])))
 
 ;; ============================================================
 ;; 寄存器输出
@@ -283,18 +914,14 @@
     ;; 被合并的标签 -> 输出函数名
     [(set-member? (merged-labels) canonical-name)
      (define prefix (emit-config-label-prefix (current-emit-config)))
-     (unless (string=? prefix "")
-       (port-write-string port prefix))
-     (port-display port fn-name)]
+     (emit-asm-symbol/port fn-name port prefix)]
     ;; 函数内的局部标签
     [(and fn-name (set-member? local-labels name))
      (port-write-string port (make-local-label fn-name canonical-name))]
     ;; 外部引用 (函数名等)
     [else
      (define prefix (emit-config-label-prefix (current-emit-config)))
-     (unless (string=? prefix "")
-       (port-write-string port prefix))
-     (port-display port name)]))
+     (emit-asm-symbol/port name port prefix)]))
 
 ;; 直接写入端口版本
 (define (emit-operand/port op port)
@@ -511,8 +1138,7 @@
      (when (eq? (emit-config-syntax config) 'apple)
        (port-write-string port ".p2align 2")
        (port-newline port))
-     (port-write-string port prefix)
-     (port-display port name)
+     (emit-asm-symbol/port name port prefix)
      (port-write-string port ":")
      #t]
 
@@ -547,8 +1173,7 @@
     ;; 全局符号
     [(global)
      (port-write-string port ".globl ")
-     (port-write-string port prefix)
-     (port-display port name)
+     (emit-asm-symbol/port name port prefix)
      #t]
 
     ;; 数据
@@ -617,10 +1242,19 @@
 ;; ============================================================
 
 (define (emit-function/port fn port)
+  (if (current-debug-file-state)
+      (emit-function/port* fn port)
+      (call-with-fresh-debug-file-state
+       (lambda () (emit-function/port* fn port)))))
+
+(define (emit-function/port* fn port)
   (define config (current-emit-config))
   (define prefix (emit-config-label-prefix config))
   (define fn-name (asm-function-name fn))
   (define merge-labels? (emit-config-merge-colocated-labels? config))
+  (define debug-low-label (asm-symbol-token fn-name prefix))
+  (define debug-high-label (debug-function-end-label fn-name))
+  (debug-register-function!/port fn debug-low-label debug-high-label port)
 
   ;; 收集函数内的所有局部标签
   (define local-labels
@@ -666,7 +1300,8 @@
                  [current-function-labels local-labels]
                  [current-function-label-aliases label-aliases]
                  [merged-labels labels-to-merge]
-                 [local-label-ids label-id-map])
+                 [local-label-ids label-id-map]
+                 [current-cfi-state (make-cfi-state)])
 
     ;; 获取函数对齐属性
     ;; = max(用户指定的对齐, 函数内部最大对齐)
@@ -678,8 +1313,7 @@
     (define is-export? (fn-get-info fn 'export #f))
     (when is-export?
       (port-write-string port ".globl ")
-      (port-write-string port prefix)
-      (port-display port fn-name)
+      (emit-asm-symbol/port fn-name port prefix)
       (port-newline port))
 
     ;; 对齐指令 (使用函数属性或默认值)
@@ -687,17 +1321,36 @@
     (port-display port fn-align)
     (port-newline port)
 
-    (port-write-string port prefix)
-    (port-display port fn-name)
+    (emit-asm-symbol/port fn-name port prefix)
     (port-write-string port ":")
     (port-newline port)
 
     (when (emit-config-emit-cfi? config)
       (port-write-string port ".cfi_startproc")
-      (port-newline port))
+      (port-newline port)
+      (emit-cfi-def-cfa/port 'sp 0 port))
 
     ;; 按基本块顺序输出
     (define visited (make-hash))
+
+    (define (branch-target-label ins)
+      (match ins
+        [(ast-ins 'b #f (list (ast-label target #f _)) _)
+         target]
+        [_ #f]))
+
+    (define (skip-terminal-branch? block succs)
+      (and (= (length succs) 1)
+           (not (hash-has-key? visited (bb-id-val (car succs))))
+           (let* ([instructions (basic-block-instructions block)]
+                  [n (pvector-length instructions)])
+             (and (> n 0)
+                  (let* ([last-ins (pvector-ref instructions (sub1 n))]
+                         [target (branch-target-label last-ins)]
+                         [target-id (and target (fn-get-id fn target))])
+                    (and target-id
+                         (= (bb-id-val target-id)
+                            (bb-id-val (car succs)))))))))
 
     ;; BFS 遍历基本块
     (define (emit-block bb-id)
@@ -705,6 +1358,8 @@
         (hash-set! visited (bb-id-val bb-id) #t)
         (define block (fn-get-block fn (bb-id-val bb-id)))
         (when block
+          (define succs (fn-successors fn bb-id))
+          (define skip-last-branch? (skip-terminal-branch? block succs))
           ;; 标签
           (define label (fn-get-label fn bb-id))
           (when label
@@ -717,20 +1372,26 @@
               (port-newline port)))
 
           ;; 指令
-          (for ([ins (in-pvector (basic-block-instructions block))])
+          (define instructions (basic-block-instructions block))
+          (for ([ins (in-pvector instructions)]
+                [i (in-naturals)])
             (cond
               [(ast-ins? ins)
                ;; 检查是否跳过冗余指令
-               (unless (and (emit-config-skip-redundant-mov? config)
-                            (redundant-instruction? ins))
+               (unless (or (and skip-last-branch?
+                                (= i (sub1 (pvector-length instructions))))
+                           (and (emit-config-skip-redundant-mov? config)
+                                (redundant-instruction? ins)))
+                 (emit-debug-loc/port ins port)
                  (emit-instruction/port ins port)
-                 (port-newline port))]
+                 (port-newline port)
+                 (emit-cfi-after-ins/port ins port))]
               [(ast-directive? ins)
                (when (emit-directive/port ins port)
                  (port-newline port))]))
 
           ;; 后继块
-          (for ([succ (fn-successors fn bb-id)])
+          (for ([succ (in-list succs)])
             (emit-block succ)))))
 
     ;; 只有非空函数才输出基本块
@@ -739,7 +1400,8 @@
 
     (when (emit-config-emit-cfi? config)
       (port-write-string port ".cfi_endproc")
-      (port-newline port))))
+      (port-newline port))
+    (emit-debug-text-label/port debug-high-label port)))
 
 ;; 返回字符串版本 (兼容)
 (define (emit-function fn)
@@ -761,6 +1423,12 @@
 ;; ============================================================
 
 (define (emit-module/port cfg port)
+  (if (current-debug-file-state)
+      (emit-module/port* cfg port)
+      (call-with-fresh-debug-file-state
+       (lambda () (emit-module/port* cfg port)))))
+
+(define (emit-module/port* cfg port)
   (define config (current-emit-config))
   (define comment-prefix (emit-comment-prefix config))
 
@@ -776,6 +1444,7 @@
   (port-write-string port ".text")
   (port-newline port)
   (port-newline port)
+  (emit-debug-text-begin/port port)
 
   ;; 所有函数
   (for ([i (in-range (cfg-function-count cfg))])
@@ -784,7 +1453,9 @@
       (emit-function/port fn port)
       (port-newline port)))
 
-  (emit-module-items/port (cfg-get-info cfg 'module-items '()) port))
+  (emit-debug-text-end/port port)
+  (emit-module-items/port (cfg-get-info cfg 'module-items '()) port)
+  (emit-debug-dwarf-footer/port port))
 
 (define (emit-module-items/port items port)
   (when (pair? items)
@@ -821,9 +1492,7 @@
 (define (format-label name)
   (define config (current-emit-config))
   (define prefix (emit-config-label-prefix config))
-  (if (string=? prefix "")
-      (if (symbol? name) (symbol->string name) name)
-      (string-append prefix (if (symbol? name) (symbol->string name) name))))
+  (asm-symbol-token name prefix))
 
 (define (indent-line line)
   (define config (current-emit-config))

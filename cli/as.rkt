@@ -57,6 +57,8 @@
 ;; 调试输出
 (define dump-flags (make-parameter '()))  ; '(ast cfg liveness interference allocation)
 (define verbose-level (make-parameter 0))  ; 0=quiet, 1=summary, 2=detail, 3=trace
+(define emit-debug-lines (make-parameter #f)) ; 输出 .file/.loc 行号调试信息
+(define emit-debug-reg-map (make-parameter #f)) ; 输出虚拟寄存器映射注释
 
 ;; 汇编语法
 (define input-syntax (make-parameter 'sexp)) ; 'sexp | 'gnu | 'auto
@@ -291,6 +293,25 @@
              (length items) (pvector-length errors)))
 
   (parse-stage-result items errors results))
+
+(define (run-parse-stage/files input-files)
+  (cond
+    [(null? input-files)
+     (parse-stage-result '()
+                         (pvector-cons-right (pvector-empty) "未提供输入文件")
+                         '())]
+    [(null? (cdr input-files))
+     (run-parse-stage (car input-files))]
+    [else
+     (define results
+       (for/list ([input-file (in-list input-files)])
+         (run-parse-stage input-file)))
+     (parse-stage-result
+      (apply append (map parse-stage-result-items results))
+      (for/fold ([errs (pvector-empty)])
+                ([r (in-list results)])
+        (pvector-append errs (parse-stage-result-errors r)))
+      results)]))
 
 ;; 检查函数外的指令
 ;; 返回 pvector of 错误消息
@@ -602,6 +623,143 @@
         (printf ";;     ~a → ~a\n" (car kv) (cdr kv)))))
   (displayln ";; === End Allocation ===\n"))
 
+(define (debug-reg-id->string r)
+  (define prefix
+    (case (reg-id-class r)
+      [(gpr) (if (<= (reg-id-width r) 32) "w" "x")]
+      [(fpr) (case (reg-id-width r)
+               [(8) "b"]
+               [(16) "h"]
+               [(32) "s"]
+               [(64) "d"]
+               [else "q"])]
+      [(predicate) "p"]
+      [else "?"]))
+  (if (reg-id-virtual? r)
+      (format "~a.~a" prefix (reg-id-id r))
+      (format "~a~a" prefix (reg-id-id r))))
+
+(define (debug-phys-reg->string reg id)
+  (case (reg-id-class reg)
+    [(gpr) (format "~a~a" (if (<= (reg-id-width reg) 32) "w" "x") id)]
+    [(fpr) (format "~a~a"
+                   (case (reg-id-width reg)
+                     [(8) "b"]
+                     [(16) "h"]
+                     [(32) "s"]
+                     [(64) "d"]
+                     [else "q"])
+                   id)]
+    [(predicate) (format "p~a" id)]
+    [else (format "?~a" id)]))
+
+(define (debug-allocation-target->string abi reg color)
+  (define class (reg-id-class reg))
+  (define phys (abi-color->reg abi class color))
+  (cond
+    [phys (debug-phys-reg->string reg phys)]
+    [(exact-nonnegative-integer? color) (format "color#~a" color)]
+    [else (~a color)]))
+
+(define (debug-view-names record reg)
+  (for/list ([view (in-list (hash-ref record 'views '()))]
+             #:when (equal? (hash-ref view 'reg #f) reg))
+    (hash-ref view 'name)))
+
+(define (debug-display-names record reg)
+  (define names (debug-view-names record reg))
+  (if (null? names)
+      (list (debug-reg-id->string reg))
+      names))
+
+(define (debug-virtual-assignment-lines record alloc abi)
+  (append*
+   (for/list ([kv (in-ordered-map (alloc-result-assignment alloc))]
+              #:when (reg-id-virtual? (car kv)))
+     (define reg (car kv))
+     (define color (cdr kv))
+     (for/list ([name (in-list (debug-display-names record reg))])
+       (format "~a -> ~a"
+               name
+               (debug-allocation-target->string abi reg color))))))
+
+(define (debug-coalesced-lines record alloc)
+  (append*
+   (for/list ([kv (in-ordered-map (alloc-result-coalesced alloc))]
+              #:when (reg-id-virtual? (car kv)))
+     (for/list ([name (in-list (debug-display-names record (car kv)))])
+       (format "~a -> ~a"
+               name
+               (debug-reg-id->string (cdr kv)))))))
+
+(define (debug-spilled-lines record alloc)
+  (append*
+   (for/list ([reg (in-pvector (alloc-result-spilled alloc))]
+              #:when (reg-id-virtual? reg))
+     (debug-display-names record reg))))
+
+(define (debug-allocation-record-empty? record)
+  (define alloc (hash-ref record 'allocation #f))
+  (or (not alloc)
+      (and (ordered-map-empty? (alloc-result-assignment alloc))
+           (ordered-map-empty? (alloc-result-coalesced alloc))
+           (= (pvector-length (alloc-result-spilled alloc)) 0))))
+
+(define (debug-reg-map-records result)
+  (define fn (pipeline-result-function result))
+  (define stored-records (fn-get-info fn 'debug-reg-maps #f))
+  (define records
+    (if (and stored-records (pair? stored-records))
+        stored-records
+        (list (hash 'iteration (pipeline-result-iterations result)
+                    'allocation (pipeline-result-allocation result)
+                    'effective-abi (multi-class-ig-effective-abi
+                                    (pipeline-result-interference result))))))
+  (define non-empty-records
+    (filter (lambda (record) (not (debug-allocation-record-empty? record)))
+            records))
+  (if (null? non-empty-records) records non-empty-records))
+
+(define (comment-block comment-prefix title lines)
+  (define prefix (format "~a " comment-prefix))
+  (string-join
+   (cons (format "~a~a" prefix title)
+         (if (null? lines)
+             (list (format "~a  (none)" prefix))
+             (for/list ([line (in-list lines)])
+               (format "~a  ~a" prefix line))))
+   "\n"))
+
+(define (format-debug-reg-map/result result comment-prefix)
+  (define fn (pipeline-result-function result))
+  (define records (debug-reg-map-records result))
+  (define (format-record record)
+    (define alloc (hash-ref record 'allocation))
+    (define abi (hash-ref record 'effective-abi))
+    (define iter (hash-ref record 'iteration #f))
+    (define allocated (debug-virtual-assignment-lines record alloc abi))
+    (define coalesced (debug-coalesced-lines record alloc))
+    (define spilled (debug-spilled-lines record alloc))
+    (string-join
+     (append
+      (if iter
+          (list (format "~a iteration ~a:" comment-prefix iter))
+          '())
+      (list
+       (comment-block comment-prefix "allocated:" allocated)
+       (comment-block comment-prefix "coalesced:" coalesced)
+       (comment-block comment-prefix "spilled:" spilled)))
+     "\n"))
+  (string-join
+   (append
+    (list (format "~a asmp debug reg map: ~a"
+                  comment-prefix
+                  (asm-function-name fn)))
+    (for/list ([record (in-list records)])
+      (format-record record))
+    (list (format "~a end asmp debug reg map" comment-prefix)))
+   "\n"))
+
 ;; ============================================================
 ;; 阶段 4: 代码生成
 ;; ============================================================
@@ -622,6 +780,7 @@
 
   (define config
     (struct-copy emit-config base-config
+                 [emit-debug-info? (emit-debug-lines)]
                  [emit-cfi? (emit-cfi)]
                  [skip-redundant-mov? (skip-redundant-mov)]
                  [merge-colocated-labels? (merge-colocated-labels)]))
@@ -632,9 +791,16 @@
 
   (define assembly
     (parameterize ([current-emit-config config])
+      (call-with-fresh-debug-file-state
+       (lambda ()
       (define function-sections
         (for/list ([r (in-list results)])
-          (emit-function/result r)))
+          (define function-asm (emit-function/result r))
+          (if (emit-debug-reg-map)
+              (string-append (format-debug-reg-map/result r comment-prefix)
+                             "\n"
+                             function-asm)
+              function-asm)))
       (define module-section
         (format-module-items module-items))
       (string-join
@@ -643,10 +809,13 @@
                 (list (format "~a Generated by asmp\n~a Syntax: ~a\n\n.text\n"
                               comment-prefix
                               comment-prefix
-                              (asm-syntax)))
+                              (asm-syntax))
+                      (emit-debug-text-begin))
                 function-sections
-                (list module-section)))
-       "\n\n")))
+                (list (emit-debug-text-end)
+                      module-section
+                      (emit-debug-dwarf-footer))))
+       "\n\n")))))
 
   (when (>= (verbose-level) 1)
     (eprintf "  生成: ~a 字节汇编\n" (string-length assembly)))
@@ -689,11 +858,11 @@
 ;; 主流程
 ;; ============================================================
 
-(define (run-compiler input-file)
+(define (run-compiler/files input-files)
   (define all-errors (pvector-empty))
 
   ;; 阶段 1: 解析
-  (define parse-result (run-parse-stage input-file))
+  (define parse-result (run-parse-stage/files input-files))
   (set! all-errors (pvector-append all-errors (parse-stage-result-errors parse-result)))
 
   (when (and (not (pvector-empty? (parse-stage-result-errors parse-result)))
@@ -712,8 +881,12 @@
     (exit 0))
 
   ;; 阶段 2: CFG
+  (define cfg-source
+    (if (and (pair? input-files) (null? (cdr input-files)))
+        (car input-files)
+        'multi-module))
   (define cfg-result
-    (run-cfg-stage (parse-stage-result-items parse-result) input-file))
+    (run-cfg-stage (parse-stage-result-items parse-result) cfg-source))
   (set! all-errors (pvector-append all-errors (cfg-stage-result-errors cfg-result)))
 
   (when (and (not (pvector-empty? (cfg-stage-result-errors cfg-result)))
@@ -771,6 +944,9 @@
   ;; 返回状态
   (if (pvector-empty? all-errors) 0 1))
 
+(define (run-compiler input-file)
+  (run-compiler/files (list input-file)))
+
 ;; ============================================================
 ;; 命令行解析
 ;; ============================================================
@@ -803,7 +979,7 @@
   (map string->symbol (string-split str ",")))
 
 (module+ main
-  (define input-file
+  (define input-files
     (command-line
      #:program "as"
      #:usage-help
@@ -832,6 +1008,14 @@
      [("--regalloc-debug") level
       "寄存器分配调试级别 (0-3)"
       (regalloc-debug (string->number level))]
+
+     [("-g" "--debug-lines")
+      "生成 .file/.loc 行号调试信息，供 GDB/LLDB 源码级单步使用"
+      (emit-debug-lines #t)]
+
+     [("--debug-reg-map")
+      "在输出汇编中以注释形式生成虚拟寄存器到物理寄存器的映射"
+      (emit-debug-reg-map #t)]
 
      #:multi
      [("-v" "--verbose")
@@ -946,8 +1130,8 @@
       "ABI 配置文件路径"
       (abi-config-path path)]
 
-     #:args (input-file)
-     input-file))
+     #:args input-files
+     input-files))
 
   ;; 捕获所有未处理的异常，提供友好的错误消息
   (with-handlers
@@ -971,7 +1155,7 @@
             (when (car ctx)
               (eprintf "  ~a\n" (car ctx)))))
         (exit 1))])
-    (exit (run-compiler input-file))))
+    (exit (run-compiler/files input-files))))
 
 ;; ============================================================
 ;; 库接口 (供其他模块使用)
@@ -980,6 +1164,7 @@
 (provide
  ;; 主函数
  run-compiler
+ run-compiler/files
 
  ;; 分阶段结果
  (struct-out parse-stage-result)
@@ -989,6 +1174,7 @@
 
  ;; 分阶段执行
  run-parse-stage
+ run-parse-stage/files
  run-cfg-stage
  run-regalloc-stage
  run-emit-stage
@@ -999,6 +1185,8 @@
  stop-after
  dump-flags
  verbose-level
+ emit-debug-lines
+ emit-debug-reg-map
  input-syntax
  asm-syntax
  emit-cfi
