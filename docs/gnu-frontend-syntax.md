@@ -86,10 +86,11 @@ entry:
 
 ## 内联模板
 
-`.inline-function` 可以把一段代码声明成只供内联使用的模板。模板体应该优先使用虚拟寄存器表达输入、输出和状态；没有写进签名的虚拟寄存器会被当作模板内部临时量，每次 inline 时自动改名，不需要在调用点手动绑定。
+`.function` 定义一个带签名的代码块；调用点用 `.inline` 时展开函数体，用 `.call` 时生成 `bl target`。模板体应该优先使用虚拟寄存器表达输入、输出和状态；没有写进签名的虚拟寄存器会被当作 inline 实例内部临时量，每次展开时自动改名，不需要在调用点手动绑定。旧 `.inline-function` 仍可解析为兼容写法，但不再是推荐语法。
 
 ```asm
-.inline-function flush8 (inout: x.out, x.bits, w.count)
+.function flush8 (inout: x.out, x.bits, w.count)
+entry:
 loop:
   cmp w.count, #8
   b.lt done
@@ -102,16 +103,19 @@ done:
   .return
 .end
 
-.asmp.function caller abi=aapcs64 export
+.function caller export ()
+entry:
   mov x.out, x0
   mov x.bits, #0
   mov w.count, #0
   .inline flush8 (x.out=x.out, x.bits=x.bits, w.count=w.count)
   ret
-.asmp.end_function
+.end
 ```
 
-调用点只允许具名绑定：每个实参都必须写成 `formal=actual`，不支持位置参数，也不会因为名字相同而隐式传入。绑定的左侧必须是模板签名里声明过的虚拟寄存器形参，右侧是当前调用点中的寄存器；少传、多传、重复传都会报错。`in` / `out` / `inout` 目前用于声明模板接口和检查绑定集合，调用语法本身一致。
+`.inline` 调用点只允许具名绑定：每个实参都必须写成 `formal=actual`，不支持位置参数，也不会因为名字相同而隐式传入。绑定的左侧必须是 callee 签名里声明过的虚拟寄存器形参，右侧是当前调用点中的寄存器；少传、多传、重复传都会报错。`in` / `out` / `inout` 目前用于声明接口和检查绑定集合，调用语法本身一致。
+
+如果一个未 `export` 的 `.function` 只作为 `.inline` 目标使用，且展开后没有任何 `bl` 引用它，CLI 输出阶段会省掉它的 standalone 函数体。只要同一个函数被 `.call` 或原始 `bl` 引用，或者带有 `export`，它仍会作为普通函数输出。
 
 GPR 绑定按同一个虚拟名贯通 `x.` / `w.` 视图，例如把 `x.bits=x.acc` 绑定后，模板中的 `w.bits` 会落到同一个物理寄存器的 32-bit 视图。`.clobber flags` 这类声明目前只作为语法预留入口，后续可以接入更严格的标志/寄存器副作用检查。
 
@@ -144,7 +148,7 @@ entry:
 .end
 ```
 
-`.call` 会按固定托管调用约定降低为入参 `mov`、`bl target`、出参 `mov`。当前最小实现支持最多 8 个 GPR 参数；`in` / `inout` 在调用前传入，`out` / `inout` 在返回后传回。找不到 `.function` 定义、少传、多传或重复绑定都会报错。直接调用 C/libc/未知外部符号仍使用原始 `bl symbol` 和物理 ABI 寄存器。
+`.call` 会按固定托管调用约定降低为入参 move、`bl target`、出参 move。GPR、vector/FPR/SVE 和 predicate 参数分别按 ABI 的 `args` slot 计数：`x` / `w` 使用 GPR slot，`s` / `d` 使用 `fmov`，`v` / `q` 使用 128-bit 向量 `mov vN.16b, vM.16b`，`z` 使用 `orr zN.d, zM.d, zM.d` 做 bit-copy，`p` 使用 `mov pN.b, pM.b`。固定 FPR/NEON 和 SVE `z` 共享同一组 vector slot，predicate `p` 使用独立 slot。`in` / `inout` 在调用前传入，`out` / `inout` 在返回后传回同一个托管 slot。找不到 `.function` 定义、少传、多传、重复绑定或 slot 数量超过 ABI 配置都会报错。当前 MVP 不做 stack fallback；寄存器组和 lane/index 形参仍是下一阶段能力。直接调用 C/libc/未知外部符号仍使用原始 `bl symbol` 和物理 ABI 寄存器。
 
 命令行可以传入多个输入文件，asmp 会先合并构建图再解析 `.call` 目标：
 
@@ -161,6 +165,21 @@ racket cli/as.rkt --gnu-input -o out.s caller.asm callee.asm
 ```
 
 函数名是可链接符号；普通 `entry:` / `loop:` / `done:` label 仍然只在当前函数内可见，后端会输出成函数作用域局部标签。不同函数可以重复使用 `entry:`，同一个函数内仍不应该重复定义同名 label。带 `-` 的函数符号会在输出汇编中按需 quote，以兼容 GNU/Apple assembler。
+
+IR 中会同时保留 logical function identity 和 concrete version identity。源代码里的 `.function crypto.deflate.main` 会得到 canonical version；后续内部 calling convention 或 caller-specialization clone 会使用新的 private linkage symbol，例如 `crypto.deflate.main$asmp.cc1`，但 metadata 仍指向 logical function `crypto.deflate.main`，并记录 version id、clone reason、specialization key 和 debug origin。诊断、debug 和 profile 归并应默认回到 logical function，必要时再显示具体 clone version。
+
+当前已经有 CFG 级 clone MVP：`semantic/function-clone.rkt` 可以为一个 `.function` 插入新的 versioned linkage symbol，并把指定 caller 里的直接 `bl target` 或尚未 lower 的 `.call target (...)` 改指向 clone。clone group 记录在 CFG metadata 中，函数自身的 `function-version` 是权威身份来源。这个能力目前是 IPA/ABI 自动选择前的机制层，不会自动决定哪个 caller 应该走哪个 calling convention，也还没有接入默认 pipeline；策略选择、cost model、clone 数量限制和 debug/profile 归并仍是后续工作。
+
+建议按下面的顺序阅读示例，逐步建立托管调用模型：
+
+| 文件 | 重点 |
+|------|------|
+| `example/014-managed-call-basic.asm` | 最小 `.function/.call`，只展示 named binding 和局部 label |
+| `example/015-managed-call-hello.asm` | 托管调用如何包住一个真实 C ABI `puts` 调用 |
+| `example/016-managed-call-fpr-neon.asm` | `d` 标量和 `v` 向量参数如何占用 vector/FPR slot |
+| `example/017-managed-call-sve-registers.asm` | SVE `z` 和 predicate `p` 的寄存器传参 MVP |
+
+这几份示例也刻意暴露当前边界：`.call` 只查找同一次构建图里的 `.function`，所有绑定必须具名，FPR/NEON/SVE/predicate 目前只做寄存器 slot 传递，没有 stack fallback，也还不支持寄存器组、lane/index 形参。
 
 ## 寄存器
 
@@ -199,19 +218,19 @@ p.mask/m    // predicate virtual
 ```asm
 .asmp.function main abi=aapcs64 export
 main:
-  .asmp.save fp, lr
+  .save fp, lr
   mov fp, sp
   bl puts
-  .asmp.restore fp, lr
+  .restore fp, lr
   ret
 .asmp.end_function
 ```
 
-`.asmp.save` / `.asmp.restore` 会进入同一套 `save!` / `load!` 管线：源码显式声明保存哪些寄存器，后端自动分配栈槽，并选择 `stp` / `ldp`、pre-index / post-index、栈对齐和释放位置。`.asmp.load` 仍作为 `.asmp.restore` 的兼容别名可用。
+`.save` / `.restore` 会进入同一套 `save!` / `load!` 管线：源码显式声明保存哪些寄存器，后端自动分配栈槽，并选择 `stp` / `ldp`、pre-index / post-index、栈对齐和释放位置。`.load` 是 `.restore` 的别名；旧 `.asmp.save` / `.asmp.restore` / `.asmp.load` 仍可作为兼容写法解析。
 
 ## 栈指针写入纪律
 
-源码中直接写 `sp` 默认会发出警告，推荐只通过 `.asmp.save` / `.asmp.restore` 等栈管理 directive 改变栈边界：
+源码中直接写 `sp` 默认会发出警告，推荐只通过 `.save` / `.restore` 等栈管理 directive 改变栈边界：
 
 ```bash
 racket cli/as.rkt --gnu-input input.asm                 # 默认: 警告
@@ -275,7 +294,7 @@ racket cli/as.rkt --gnu-input -g --cfi --debug-reg-map -o out.s input.asm
 
 这个映射是给人读的完整分配摘要，会同时列出 allocated、coalesced 和 spilled；DWARF 变量目前只覆盖能解析到物理寄存器的位置。映射注释同样保留源码寄存器视图，所以 `w.name` 不会被显示成 `x.name`；如果源码确实使用了同一个虚拟寄存器的多个视图，会列出多个对应点。
 
-`--cfi` 会生成 `.cfi_startproc` / `.cfi_endproc`，并跟踪常见 AArch64 栈帧操作：`sub/add sp`、`stp/str` 保存 GPR、`ldp/ldr` 恢复 GPR、`mov fp, sp`。配合 `.asmp.save` / `.asmp.restore` 生成的栈帧，可以让调试器和 profiler 更可靠地做 backtrace：
+`--cfi` 会生成 `.cfi_startproc` / `.cfi_endproc`，并跟踪常见 AArch64 栈帧操作：`sub/add sp`、`stp/str` 保存 GPR、`ldp/ldr` 恢复 GPR、`mov fp, sp`。配合 `.save` / `.restore` 生成的栈帧，可以让调试器和 profiler 更可靠地做 backtrace：
 
 ```bash
 racket cli/as.rkt -g --cfi --gnu-input -o out.s input.asm
@@ -392,13 +411,13 @@ GNU 输入文件：
 
 .asmp.function hello_main abi=aapcs64 export
 hello_main:
-  .asmp.save fp, lr
+  .save fp, lr
   mov fp, sp
   adrp x0, :got:hello_msg
   ldr x0, [x0, :got_lo12:hello_msg]
   bl puts
   mov w0, #0
-  .asmp.restore fp, lr
+  .restore fp, lr
   ret
 .asmp.end_function
 
@@ -484,13 +503,13 @@ clang -nostdlib /tmp/standalone-hello.o -o /tmp/standalone-hello
 
 .asmp.function main abi=aapcs64 export
 main:
-  .asmp.save fp, lr
+  .save fp, lr
   mov fp, sp
   adrp x0, :pg_hi21:hello_msg
   add x0, x0, #:lo12:hello_msg
   bl puts
   mov w0, #0
-  .asmp.restore fp, lr
+  .restore fp, lr
   ret
 .asmp.end_function
 

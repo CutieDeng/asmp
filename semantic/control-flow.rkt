@@ -15,6 +15,7 @@
 ;;   - 所有 bb-id 统一封装为 (bb-id val) 类型
 
 (require "../parser/ast.rkt"
+         "function-identity.rkt"
          "../syntax/operand-type.rkt"
          (only-in "use-def.rkt"
                   extract-use-def
@@ -34,6 +35,12 @@
   bb-id-compare
 
   ;; 数据结构
+  (struct-out function-version)
+  make-canonical-function-version
+  make-clone-function-version
+  default-clone-linkage-symbol
+  function-version-clone?
+  function-version-display-name
   (struct-out bb-debug)
   (struct-out basic-block)
   (struct-out fn-debug)
@@ -56,6 +63,12 @@
   ;; 函数操作
   fn-set-info
   fn-get-info
+  fn-function-version
+  fn-logical-name
+  fn-linkage-symbol
+  fn-debug-display-name
+  fn-with-function-version
+  fn-clone-version
   fn-get-label    ; bb-id -> symbol | #f
   fn-get-id       ; symbol -> bb-id | #f
 
@@ -197,6 +210,47 @@
 (define (fn-get-info fn key [default #f])
   (ordered-map-ref (asm-function-info fn) key default))
 
+(define (fn-function-version fn)
+  (or (fn-get-info fn 'function-version #f)
+      (make-canonical-function-version
+       (asm-function-name fn)
+       #:linkage-symbol (asm-function-name fn))))
+
+(define (fn-logical-name fn)
+  (function-version-logical-name (fn-function-version fn)))
+
+(define (fn-linkage-symbol fn)
+  (function-version-linkage-symbol (fn-function-version fn)))
+
+(define (fn-debug-display-name fn)
+  (function-version-display-name (fn-function-version fn)))
+
+(define (fn-with-function-version fn version)
+  (struct-copy asm-function fn
+               [name (function-version-linkage-symbol version)]
+               [info (ordered-map-set (asm-function-info fn)
+                                      'function-version
+                                      version)]))
+
+(define (fn-clone-version fn
+                          #:version-id version-id
+                          #:version-kind [version-kind 'clone]
+                          #:clone-reason [clone-reason 'unspecified]
+                          #:specialization-key [specialization-key #f]
+                          #:linkage-symbol [linkage-symbol
+                                            (default-clone-linkage-symbol
+                                             (fn-logical-name fn)
+                                             version-id)])
+  (fn-with-function-version
+   fn
+   (make-clone-function-version
+    (fn-function-version fn)
+    #:version-id version-id
+    #:version-kind version-kind
+    #:clone-reason clone-reason
+    #:specialization-key specialization-key
+    #:linkage-symbol linkage-symbol)))
+
 (define (fn-get-label fn bbid)
   (define key (if (bb-id? bbid) (bb-id-val bbid) bbid))
   (ordered-map-ref (asm-function-id->label fn) key #f))
@@ -301,7 +355,7 @@
 
 (define (process-item b item)
   (match item
-    [(ast-directive 'function name attrs _)
+    [(ast-directive 'function name attrs loc)
      (define b1 (finalize-current-function b))
      (define cfg (builder-cfg b1))
      (define fn-id (control-flow-graph-next-fn-id cfg))
@@ -309,7 +363,17 @@
        (struct-copy control-flow-graph cfg
                     [next-fn-id (add1 fn-id)]))
      ;; attrs 是 hash，保存到 builder 中
-     (define fn-attrs (if (hash? attrs) attrs (hash)))
+     (define attrs0 (if (hash? attrs) attrs (hash)))
+     (define attrs/function-loc
+       (hash-set attrs0 'function-loc loc))
+     (define fn-attrs
+       (if (hash-has-key? attrs/function-loc 'function-version)
+           attrs/function-loc
+           (hash-set attrs/function-loc
+                     'function-version
+                     (make-canonical-function-version name
+                                                      #:debug-origin loc
+                                                      #:linkage-symbol name))))
      (builder new-cfg fn-id name fn-attrs '() (builder-next-bb-id b1))]
 
     [(ast-directive 'end-function _ _ _)

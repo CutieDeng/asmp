@@ -4,7 +4,7 @@
 ;; test/example-test.rkt - example 目录编译测试
 ;; ============================================================
 ;;
-;; 测试 example/*.d 能否成功编译
+;; 测试 example/*.d 和 example/*.asm 能否成功编译
 ;;
 ;; 运行: racket test/example-test.rkt
 
@@ -25,8 +25,14 @@
 (define (compile-file path)
   (with-handlers ([exn:fail? (lambda (e)
                                (values #f (exn-message e) #f))])
+    (define syntax-mode
+      (if (regexp-match? #rx"\\.(asm|s)$" (path->string path))
+          'gnu
+          'sexp))
     (define source (file->string path))
-    (define results (parse-string source))
+    (define results (parse-string source
+                                  #:source path
+                                  #:syntax syntax-mode))
 
     ;; 检查解析错误
     (when (parse-results-has-errors? results)
@@ -74,7 +80,7 @@
 (define (find-example-files)
   (if (directory-exists? example-dir)
       (for/list ([f (in-directory example-dir)]
-                 #:when (regexp-match? #rx"\\.d$" (path->string f)))
+                 #:when (regexp-match? #rx"\\.(d|asm)$" (path->string f)))
         f)
       '()))
 

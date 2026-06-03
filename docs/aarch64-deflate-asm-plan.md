@@ -43,9 +43,9 @@ locked down. In particular:
   data directives and label-indexed loads;
 - do not add lazy matching, chains, or skipped-byte reinsertion before the raw
   one-candidate parser has a decoder-backed test;
-- keep bit-writer helpers as inline templates so helper bodies are not emitted
-  as duplicate standalone functions;
-- write helper state as `.inline-function` virtual formals and call helpers with
+- keep bit-writer helpers selected with `.inline` and use `--elim` for example
+  output so helper bodies are not emitted as duplicate standalone functions;
+- write helper state as `.function` virtual formals and call helpers with
   named-only `.inline helper (formal=actual, ...)` bindings, rather than
   smuggling state through fixed physical registers;
 - avoid spelling identity shifts such as `lsl 0`; if the assembler requires one
@@ -56,8 +56,9 @@ locked down. In particular:
 1. Fixed-Huffman core
    - Keep the current no-table implementation as the bootstrap target: it
      avoids rodata lookup tables and keeps the emitted stream easy to audit.
-   - Keep helper snippets as inline templates, so the final object contains the
-     exported compressor rather than duplicate standalone helpers.
+   - Keep helper snippets as inline-selected `.function` blocks, so the final
+     object contains the exported compressor rather than duplicate standalone
+     helpers.
    - Add correctness tests against a deflate decoder once the full pipeline can
      run in this checkout.
 
@@ -90,9 +91,9 @@ features land:
 - Literal pools and constant materialization helpers for 32/64-bit immediates,
   addresses, and platform-specific relocations.
 - Parameterized macros or inline templates with explicit inputs, outputs, and
-  clobbers. The current `.inline-function` plus named-only `.inline` calls avoid
-  duplicate helper emission and make state binding explicit; the next gap is
-  using the declared modes and clobbers for stronger compile-time checks.
+  clobbers. The current `.function` signature plus named-only `.inline` calls
+  make state binding explicit; the next gap is using the declared modes and
+  clobbers for stronger compile-time checks.
 - Better alias modelling for common bit operations such as `ubfx`, immediate
   `lsl`/`lsr`, logical-immediate `and`, and instruction selection when several
   encodings share the same operand signature.

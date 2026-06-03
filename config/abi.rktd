@@ -35,7 +35,9 @@
   (pred
     (num-regs 16)
     (banned #x0)
-    (preserved #x0))           ; 全部 caller-saved
+    (preserved #x0)            ; 全部 caller-saved
+    (args 0 1 2 3)             ; p0-p3 SVE predicate 参数/结果
+    (return 0 1 2 3))          ; p0-p3 SVE predicate 参数/结果
   (special-regs
     (sp 31) (fp 29) (lr 30) (platform 18)))
 
@@ -64,7 +66,9 @@
   (pred
     (num-regs 16)
     (banned #x0)
-    (preserved #x0))
+    (preserved #x0)
+    (args 0 1 2 3)
+    (return 0 1 2 3))
   (special-regs
     (sp 31) (fp 29) (lr 30) (platform 18)))
 

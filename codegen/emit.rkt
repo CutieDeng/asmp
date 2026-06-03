@@ -391,11 +391,11 @@
         (define name (debug-variable-name var))
         (if (set-member? names name)
             (values vars names)
-            (values (cons var vars) (set-add names name)))))
+             (values (cons var vars) (set-add names name)))))
     (set-debug-file-state-functions!
      state
      (append (debug-file-state-functions state)
-             (list (debug-function (symbol->string (asm-function-name fn))
+             (list (debug-function (fn-debug-display-name fn)
                                    low-label
                                    high-label
                                    deduped))))))
@@ -1077,6 +1077,13 @@
      (and (ast-reg? dst) (ast-reg? src)
           (equal? (ast-reg-kind dst) (ast-reg-kind src))
           (equal? (ast-reg-id dst) (ast-reg-id src)))]
+    [(ast-ins 'orr #f (list dst src1 src2) _)
+     (and (ast-reg? dst) (ast-reg? src1) (ast-reg? src2)
+          (eq? (ast-reg-kind dst) 'z)
+          (eq? (ast-reg-kind src1) 'z)
+          (eq? (ast-reg-kind src2) 'z)
+          (equal? (ast-reg-id dst) (ast-reg-id src1))
+          (equal? (ast-reg-id dst) (ast-reg-id src2)))]
     [_ #f]))
 
 ;; mrs/msr 的系统寄存器操作数应按原名输出，不参与 Apple 符号前缀规则。

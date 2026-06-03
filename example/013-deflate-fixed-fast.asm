@@ -19,8 +19,8 @@
 //   return x0 = bytes written
 //
 // Syntax/semantic discussion anchors:
-//   - Helper blocks use `.inline-function`; they are templates, not emitted
-//     functions.
+//   - Helper blocks use `.function`; call sites decide whether to expand them
+//     with `.inline` or branch to them with `.call`.
 //   - Helpers declare only their interface virtual registers. Undeclared
 //     virtual registers inside a helper are local temporaries and are freshly
 //     renamed at each inline site.
@@ -44,7 +44,7 @@
 // Clobbers:
 //   flags
 // ------------------------------------------------------------
-.inline-function df_flush8 (inout: x.out, x.bitbuf, w.bit_count)
+.function df_flush8 (inout: x.out, x.bitbuf, w.bit_count)
 entry:
 flush_loop:
   cmp w.bit_count, #8
@@ -65,7 +65,7 @@ flush_done:
 //   in    w.nbits
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_raw (in: x.bits, w.nbits, inout: x.out, x.bitbuf, w.bit_count)
+.function df_write_raw (in: x.bits, w.nbits, inout: x.out, x.bitbuf, w.bit_count)
 entry:
   lsl x.tmp, x.bits, x.bit_count
   orr x.bitbuf, x.bitbuf, x.tmp
@@ -81,7 +81,7 @@ entry:
 //   in    w.nbits
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_huff (inout: w.code, x.out, x.bitbuf, w.bit_count, in: w.nbits)
+.function df_write_huff (inout: w.code, x.out, x.bitbuf, w.bit_count, in: w.nbits)
 entry:
   rbit w.code, w.code
   mov w.tmp, #32
@@ -97,7 +97,7 @@ entry:
 //   in    w.lit
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_fixed_lit (in: w.lit, inout: x.out, x.bitbuf, w.bit_count)
+.function df_write_fixed_lit (in: w.lit, inout: x.out, x.bitbuf, w.bit_count)
 entry:
   cmp w.lit, #144
   b.hs lit_high
@@ -123,7 +123,7 @@ lit_high:
 // Template formals:
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_eob (inout: x.out, x.bitbuf, w.bit_count)
+.function df_write_eob (inout: x.out, x.bitbuf, w.bit_count)
 entry:
   mov w.code, #0
   mov w.nbits, #7
@@ -137,7 +137,7 @@ entry:
 //   in    w.len = match length, 3..258
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_len (in: w.len, inout: x.out, x.bitbuf, w.bit_count)
+.function df_write_len (in: w.len, inout: x.out, x.bitbuf, w.bit_count)
 entry:
   cmp w.len, #258
   b.eq len_258
@@ -239,7 +239,7 @@ len_done:
 //   in    w.dist = match distance, 1..32768
 //   inout x.out, x.bitbuf, w.bit_count
 // ------------------------------------------------------------
-.inline-function df_write_dist (in: w.dist, inout: x.out, x.bitbuf, w.bit_count)
+.function df_write_dist (in: w.dist, inout: x.out, x.bitbuf, w.bit_count)
 entry:
   // n = distance - 1
   sub w.n, w.dist, #1

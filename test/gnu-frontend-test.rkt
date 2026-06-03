@@ -21,6 +21,7 @@
 (define-runtime-path standalone-hello-source "../example/011-gnu-standalone-hello.asm")
 (define-runtime-path macos-hello-source "../example/012-macos-standalone-hello.asm")
 (define-runtime-path deflate-asm-source "../example/013-deflate-fixed-fast.asm")
+(define-runtime-path abi-config-source "../config/abi.rktd")
 
 (define (parse-gnu source #:validate? [validate? #t])
   (parse-string source
@@ -179,7 +180,7 @@ ASM
    (test-case "-g maps inline call line to expanded entry"
      (define results
        (parse-string #<<ASM
-.inline-function bump2 (inout: x.value)
+.function bump2 (inout: x.value)
 entry:
   add x.value, x.value, #1
   add x.value, x.value, #2
@@ -228,7 +229,7 @@ ASM
      (check-not-false (regexp-match? #rx"\\.cfi_restore w30" rendered))
      (check-not-false (regexp-match? #rx"\\.cfi_endproc" rendered)))
 
-   (test-case "GNU deflate example compiles through inline-only helpers"
+   (test-case "GNU deflate example compiles through .function helpers selected by .inline"
      (define results (parse-file deflate-asm-source #:syntax 'gnu #:validate? #t))
      (check-equal? (parse-results-error-count results) 0)
      (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
@@ -259,10 +260,10 @@ ASM
      (check-not-false (regexp-match? #rx"x\\.out -> x[0-9]+" rendered))
      (check-not-false (regexp-match? #rx"x\\.dst_base" rendered)))
 
-   (test-case ".inline-function calls are named-only"
+   (test-case ".function inline calls are named-only"
      (define good
        (parse-gnu #<<ASM
-.inline-function copy (in: x.src, out: x.dst)
+.function copy (in: x.src, out: x.dst)
 entry:
   mov x.dst, x.src
   .return
@@ -280,12 +281,12 @@ ASM
      (check-equal? (parse-results-error-count (parse-gnu ".inline copy x.src=x0\n")) 1)
      (check-equal? (parse-results-error-count (parse-gnu ".inline copy (x.src)\n")) 1))
 
-   (test-case ".inline-function binding set is checked"
+   (test-case ".function inline binding set is checked"
      (define (check-inline-error call rx)
        (define results
          (parse-gnu
           (format #<<ASM
-.inline-function copy (in: x.src, out: x.dst)
+.function copy (in: x.src, out: x.dst)
 entry:
   mov x.dst, x.src
   .return
@@ -307,6 +308,96 @@ ASM
                          #rx"未声明参数")
      (check-inline-error ".inline copy (x.src=x0, x.src=x1, x.dst=x2)"
                          #rx"重复绑定参数"))
+
+   (test-case ".inline-function remains a compatibility alias"
+     (define results
+       (parse-gnu #<<ASM
+.inline-function copy (in: x.src, out: x.dst)
+entry:
+  mov x.dst, x.src
+  .return
+.end
+
+.function caller export ()
+entry:
+  .inline copy (x.src=x0, x.dst=x1)
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (check-not-false (expand-inline-cfg (build-cfg (ok-items results)))))
+
+   (test-case "CLI omits inline-selected local .function with no branch references"
+     (define path (make-temporary-file "asmp-inline-selected-~a.asm"))
+     (call-with-output-file path
+       (lambda (out)
+         (display #<<ASM
+.function helper (inout: x.value)
+entry:
+  add x.value, x.value, #1
+  ret
+.end
+
+.function app.main export ()
+entry:
+  mov x10, #41
+  .inline helper (x.value=x10)
+  mov x0, x10
+  ret
+.end
+ASM
+                  out))
+       #:exists 'truncate)
+     (parameterize ([cli:input-syntax 'gnu]
+                    [abi-config-path abi-config-source]
+                    [default-abi-name 'aapcs64])
+       (reload-abi-config abi-config-source #:force? #t)
+       (define parse-result (cli:run-parse-stage path))
+       (check-equal? (pvector-length (cli:parse-stage-result-errors parse-result)) 0)
+       (define cfg-result
+         (cli:run-cfg-stage (cli:parse-stage-result-items parse-result) path))
+       (check-equal? (pvector-length (cli:cfg-stage-result-errors cfg-result)) 0)
+       (define regalloc-result
+         (cli:run-regalloc-stage (cli:cfg-stage-result-cfg cfg-result)
+                                 (cli:cfg-stage-result-functions cfg-result)))
+       (check-equal? (pvector-length (cli:regalloc-stage-result-errors regalloc-result)) 0)
+       (check-equal? (map asm-function-name
+                          (cli:regalloc-stage-result-functions regalloc-result))
+                     '(app.main))))
+
+   (test-case ".function can be selected by .inline or .call at the call site"
+     (define results
+       (parse-gnu #<<ASM
+.function math.add-one (
+  inout: x.value
+)
+entry:
+  add x.value, x.value, #1
+  ret
+.end
+
+.function app.main export ()
+entry:
+  mov x10, #41
+  .inline math.add-one (x.value=x10)
+  .call math.add-one (
+    x.value=x10
+  )
+  mov x0, x10
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"add x[0-9]+, x[0-9]+, #1" rendered))
+     (check-not-false (regexp-match? #rx"bl \"?math\\.add-one\"?" rendered)))
 
    (test-case ".function and .call use named managed signatures"
      (define results
@@ -355,6 +446,176 @@ ASM
      (check-not-false (regexp-match? #rx"Lmy_lib_hash_v1\\$entry:" rendered))
      (check-not-false (regexp-match? #rx"Lcrypto_deflate_main\\$entry:" rendered))
      (check-false (regexp-match? #rx"(^|\n)entry:" rendered)))
+
+   (test-case ".call supports fixed FPR and NEON vector slots"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.scale (
+  in: d.value,
+  out: d.result
+)
+entry:
+  fadd d.result, d.value, d.value
+  ret
+.end
+
+.function lib.vxor (
+  in: v.left.16b,
+  in: v.right.16b,
+  out: v.result.16b
+)
+entry:
+  eor v.result.16b, v.left.16b, v.right.16b
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.scale (
+    d.value=d2,
+    d.result=d3
+  )
+  .call lib.vxor (
+    v.left=v10,
+    v.right=v11,
+    v.result=v12
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"fmov d0, d2" rendered))
+     (check-not-false (regexp-match? #rx"bl lib\\.scale" rendered))
+     (check-not-false (regexp-match? #rx"fmov d3, d1" rendered))
+     (check-not-false (regexp-match? #rx"mov v0\\.16b, v10\\.16b" rendered))
+     (check-not-false (regexp-match? #rx"mov v1\\.16b, v11\\.16b" rendered))
+     (check-not-false (regexp-match? #rx"bl lib\\.vxor" rendered))
+     (check-not-false (regexp-match? #rx"mov v12\\.16b, v2\\.16b" rendered)))
+
+   (test-case ".call counts GPR and FPR slots independently"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.mix (
+  in: x.ga,
+  in: d.fa,
+  in: x.gb,
+  in: d.fb,
+  out: x.go,
+  out: d.fo
+)
+entry:
+  add x.go, x.ga, x.gb
+  fadd d.fo, d.fa, d.fb
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.mix (
+    x.ga=x10,
+    d.fa=d10,
+    x.gb=x11,
+    d.fb=d11,
+    x.go=x12,
+    d.fo=d12
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"mov x0, x10" rendered))
+     (check-not-false (regexp-match? #rx"fmov d0, d10" rendered))
+     (check-not-false (regexp-match? #rx"mov x1, x11" rendered))
+     (check-not-false (regexp-match? #rx"fmov d1, d11" rendered))
+     (check-not-false (regexp-match? #rx"mov x12, x2" rendered))
+     (check-not-false (regexp-match? #rx"fmov d12, d2" rendered)))
+
+   (test-case ".call supports register-only SVE vector and predicate slots"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.sve (
+  in: z.input.B,
+  in: p.mask,
+  out: z.output.B,
+  out: p.out
+)
+entry:
+  orr z.output.d, z.input.d, z.input.d
+  mov p.out.b, p.mask.b
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.sve (
+    z.input=z10,
+    p.mask=p5,
+    z.output=z11,
+    p.out=p6
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define callee-fn (cfg-get-function-by-name cfg 'lib.sve))
+     (check-not-false callee-fn)
+     (define rendered-callee
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline callee-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"lib\\.sve:\nLlib_sve\\$entry:\n    " rendered-callee))
+     (check-false (regexp-match? #rx"lib\\.sve:\n    [^\n]+\nLlib_sve\\$entry:" rendered-callee))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"orr z0\\.d, z10\\.d, z10\\.d" rendered))
+     (check-not-false (regexp-match? #rx"mov p0\\.b, p5\\.b" rendered))
+     (check-not-false (regexp-match? #rx"bl lib\\.sve" rendered))
+     (check-not-false (regexp-match? #rx"orr z11\\.d, z1\\.d, z1\\.d" rendered))
+     (check-not-false (regexp-match? #rx"mov p6\\.b, p1\\.b" rendered)))
+
+   (test-case ".call SVE MVP rejects predicate slot overflow with source locations"
+     (define results
+       (parse-string #<<ASM
+.function lib.too-many-preds (
+  in: p.a,
+  in: p.b,
+  in: p.c,
+  in: p.d,
+  in: p.e
+)
+entry:
+  ret
+.end
+ASM
+                     #:source "pred-overflow.asm"
+                     #:syntax 'gnu
+                     #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (check-exn
+      (lambda (e)
+        (and (regexp-match? #rx"pred-overflow\\.asm:1:0" (exn-message e))
+             (regexp-match? #rx"no predicate slot"
+                            (exn-message e))))
+      (lambda ()
+        (expand-inline-cfg (build-cfg (ok-items results))))))
 
    (test-case "multi-input parse lets .call find another module definition"
      (define caller-path (make-temporary-file "asmp-caller-~a.asm"))

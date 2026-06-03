@@ -415,8 +415,8 @@
     #:num-regs 16               ; p0-p15
     #:banned bitset-empty       ; 无禁用
     #:preserved bitset-empty    ; 全部 caller-saved
-    #:arg-regs '()              ; predicate 不用于参数传递
-    #:return-regs '()))         ; predicate 不用于返回值
+    #:arg-regs '(0 1 2 3)       ; p0-p3 SVE predicate 参数/结果
+    #:return-regs '(0 1 2 3)))  ; p0-p3 SVE predicate 参数/结果
 
 (define arm64-abi
   (abi-config arm64-gpr-config arm64-fpr-config arm64-pred-config))

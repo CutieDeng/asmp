@@ -2,13 +2,13 @@
 
 .asmp.function hello_main abi=aapcs64 export
 hello_main:
-  .asmp.save fp, lr
+  .save fp, lr
   mov fp, sp
   adrp x0, :got:hello_msg
   ldr x0, [x0, :got_lo12:hello_msg]
   bl puts
   mov w0, #0
-  .asmp.restore fp, lr
+  .restore fp, lr
   ret
 .asmp.end_function
 

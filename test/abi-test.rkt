@@ -83,8 +83,11 @@
 
   ;; Predicate 测试
   (test-case "arm64-abi predicate config"
-    (check-equal? (abi-get-arg-regs arm64-abi 'predicate) '())
-    (check-equal? (abi-get-return-regs arm64-abi 'predicate) '())))
+    (check-equal? (abi-get-arg-regs arm64-abi 'predicate) '(0 1 2 3))
+    (check-equal? (abi-get-return-regs arm64-abi 'predicate) '(0 1 2 3))
+    (check-true (abi-is-arg-reg? arm64-abi 'predicate 0))
+    (check-true (abi-is-return-reg? arm64-abi 'predicate 3))
+    (check-false (abi-is-arg-reg? arm64-abi 'predicate 4))))
 
 ;; ============================================================
 ;; 测试配置文件加载

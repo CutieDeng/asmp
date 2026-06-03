@@ -1,6 +1,6 @@
 # asmp 汇编器示例
 
-本目录包含 asmp Lisp S-expression 汇编语法的示例文件。
+本目录包含 asmp Lisp S-expression 汇编语法和 GNU 输入前端 `.asm` 语法的示例文件。
 
 ## 运行示例
 
@@ -38,7 +38,24 @@ racket cli/as.rkt --gnu-input -o /tmp/standalone-hello.s example/011-gnu-standal
 clang -target aarch64-linux-gnu -c /tmp/standalone-hello.s -o /tmp/standalone-hello.o
 
 # GNU 输入版 deflate 阅读/语义讨论示例
-racket cli/as.rkt --gnu-input -o /tmp/deflate-fixed-fast.s example/013-deflate-fixed-fast.asm
+racket cli/as.rkt --gnu-input --elim -o /tmp/deflate-fixed-fast.s example/013-deflate-fixed-fast.asm
+
+# 托管 .function/.call 基础示例
+racket cli/as.rkt --gnu-input --gnu --elim -o /tmp/managed-basic.s example/014-managed-call-basic.asm
+clang -target aarch64-linux-gnu -c /tmp/managed-basic.s -o /tmp/managed-basic.o
+
+# 可链接运行的 macOS main + puts 托管调用示例
+racket cli/as.rkt --gnu-input --apple --elim -g --cfi -o /tmp/managed-hello.s example/015-managed-call-hello.asm
+clang -target arm64-apple-macos11 -g -c /tmp/managed-hello.s -o /tmp/managed-hello.o
+clang -target arm64-apple-macos11 /tmp/managed-hello.o -o /tmp/managed-hello
+
+# FPR/NEON 托管 slot 示例
+racket cli/as.rkt --gnu-input --gnu --elim -o /tmp/managed-fpr-neon.s example/016-managed-call-fpr-neon.asm
+clang -target aarch64-linux-gnu -c /tmp/managed-fpr-neon.s -o /tmp/managed-fpr-neon.o
+
+# SVE z/p 托管 slot 示例
+racket cli/as.rkt --gnu-input --gnu --elim -o /tmp/managed-sve.s example/017-managed-call-sve-registers.asm
+clang -target aarch64-linux-gnu -march=armv8-a+sve -c /tmp/managed-sve.s -o /tmp/managed-sve.o
 ```
 
 ## 语法概览
@@ -128,17 +145,21 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 
 | 文件 | 描述 |
 |------|------|
-| `01-basic.d` | 基础算术、立即数、位操作 |
-| `02-memory.d` | 加载/存储、各种寻址模式 |
-| `03-branch.d` | 条件分支、循环 |
-| `04-function.d` | 函数调用约定、栈帧 |
-| `05-virtual-reg.d` | 虚拟寄存器、寄存器分配 |
-| `06-abi.d` | ABI 声明、叶函数、裸函数 |
+| `001-basic.d` | 基础算术、立即数、位操作 |
+| `002-memory.d` | 加载/存储、各种寻址模式 |
+| `003-branch.d` | 条件分支、循环 |
+| `005-function.d` | 函数调用约定、栈帧 |
+| `006-virtual-reg.d` | 虚拟寄存器、寄存器分配 |
+| `007-abi.d` | ABI 声明、叶函数、裸函数 |
 | `009-deflate-fixed-fast.d` | AArch64 fixed-Huffman deflate fast path |
 | `010-gnu-hello.asm` | GNU 输入前端 hello world 函数示例 |
 | `011-gnu-standalone-hello.asm` | GNU 输入前端独立 Linux AArch64 hello world |
 | `012-macos-standalone-hello.asm` | GNU 输入前端 macOS main + puts hello world |
 | `013-deflate-fixed-fast.asm` | GNU 输入版 fixed-Huffman deflate fast path |
+| `014-managed-call-basic.asm` | 最小 `.function/.call` named binding 示例 |
+| `015-managed-call-hello.asm` | 托管函数调用包裹 C ABI `puts` 的 hello world |
+| `016-managed-call-fpr-neon.asm` | FPR 标量和 NEON 128-bit 向量托管 slot 示例 |
+| `017-managed-call-sve-registers.asm` | SVE `z` 和 predicate `p` 寄存器托管 slot 示例 |
 
 GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs/gnu-frontend-syntax.md)。
 

@@ -12,6 +12,8 @@
 
 (require "../parser/ast.rkt"
          "control-flow.rkt"
+         "../pipeline/regalloc/abi.rkt"
+         "../pipeline/regalloc/abi-config.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
          "../vendor/cutie-ftree/pvector.rkt"
          racket/set
@@ -95,6 +97,22 @@
 (define (gpr-kind? k)
   (memq k '(x w)))
 
+(define (scalar-fpr-kind? k)
+  (memq k '(s d)))
+
+(define (vector-fpr-kind? k)
+  (memq k '(v q)))
+
+(define (sve-fpr-kind? k)
+  (eq? k 'z))
+
+(define (predicate-kind? k)
+  (eq? k 'p))
+
+(define (fixed-fpr-kind? k)
+  (or (scalar-fpr-kind? k)
+      (vector-fpr-kind? k)))
+
 (define (adapt-bound-reg template actual)
   (define template-kind (ast-reg-kind template))
   (define actual-kind (ast-reg-kind actual))
@@ -160,28 +178,139 @@
                        [_ #f]))
     (second binding)))
 
-(define (function-param-slots params loc)
-  (define next-gpr 0)
+(define (resolve-managed-call-abi attrs loc)
+  (define abi-name0
+    (or (and (hash? attrs) (hash-ref attrs 'abi #f))
+        (default-abi-name)))
+  (define abi-name
+    (cond
+      [(eq? abi-name0 'auto) 'aapcs64]
+      [else abi-name0]))
+  (cond
+    [abi-name
+     (define abi
+       (or (get-abi-by-name abi-name)
+           (and (eq? abi-name 'aapcs64) arm64-abi)))
+     (unless abi
+       (raise-inline-error loc "managed call ABI is not defined: ~a" abi-name))
+     abi]
+    [else arm64-abi]))
+
+(define (param-reg-class formal loc)
+  (define kind (ast-reg-kind formal))
+  (when (ast-reg-group-size formal)
+    (raise-inline-error loc ".call parameter register groups are not supported yet: ~a"
+                        (ast->string formal)))
+  (when (ast-reg-index formal)
+    (raise-inline-error loc ".call parameter lane/index views are not supported yet: ~a"
+                        (ast->string formal)))
+  (when (ast-reg-pred-mode formal)
+    (raise-inline-error loc ".call parameter predicate modes are not supported yet: ~a"
+                        (ast->string formal)))
+  (cond
+    [(gpr-kind? kind) 'gpr]
+    [(or (fixed-fpr-kind? kind) (sve-fpr-kind? kind)) 'fpr]
+    [(predicate-kind? kind) 'predicate]
+    [else
+     (raise-inline-error loc ".call parameter register class is not supported yet: ~a"
+                         (ast->string formal))]))
+
+(define (slot-regs-for-class abi class)
+  (case class
+    [(gpr) (abi-get-arg-regs abi 'gpr)]
+    [(fpr) (abi-get-arg-regs abi 'fpr)]
+    [(predicate) (abi-get-arg-regs abi 'predicate)]
+    [else '()]))
+
+(define (next-slot-index! counters class)
+  (define current (hash-ref counters class 0))
+  (hash-set! counters class (add1 current))
+  current)
+
+(define (slot-reg-for formal class phys-reg)
+  (define kind (ast-reg-kind formal))
+  (ast-reg kind
+           phys-reg
+           #f
+           #f
+           (ast-reg-element formal)
+           #f
+           (ast-reg-loc formal)))
+
+(define (function-param-slots params loc attrs)
+  (define abi (resolve-managed-call-abi attrs loc))
+  (define counters (make-hash))
   (for/list ([param (in-list params)])
     (match param
       [(list mode (? ast-reg? formal))
-       (unless (gpr-kind? (ast-reg-kind formal))
+       (define class (param-reg-class formal loc))
+       (define slot-regs (slot-regs-for-class abi class))
+       (define slot-index (next-slot-index! counters class))
+       (when (>= slot-index (length slot-regs))
          (raise-inline-error loc
-                             ".call currently supports GPR params only: ~a"
-                             (ast->string formal)))
-       (when (>= next-gpr 8)
-         (raise-inline-error loc ".call supports at most 8 GPR params for now"))
-       (define slot
-         (ast-reg (ast-reg-kind formal)
-                  next-gpr
-                  #f #f #f #f
-                  (ast-reg-loc formal)))
-       (set! next-gpr (add1 next-gpr))
+                             ".call ABI has no ~a slot for parameter ~a (needed index ~a)"
+                             class
+                             (ast->string formal)
+                             slot-index))
+       (define slot (slot-reg-for formal class (list-ref slot-regs slot-index)))
        (list mode formal slot)]
       [_ (raise-inline-error loc "函数参数签名非法: ~a" param)])))
 
+(define (vector-copy-view reg)
+  (ast-reg 'v
+           (ast-reg-id reg)
+           #f
+           #f
+           '16b
+           #f
+           (ast-reg-loc reg)))
+
+(define (sve-copy-view reg)
+  (ast-reg 'z
+           (ast-reg-id reg)
+           #f
+           #f
+           'd
+           #f
+           (ast-reg-loc reg)))
+
+(define (predicate-copy-view reg)
+  (ast-reg 'p
+           (ast-reg-id reg)
+           #f
+           #f
+           'b
+           #f
+           (ast-reg-loc reg)))
+
 (define (mov-ins dst src loc)
-  (ast-ins 'mov #f (list dst src) loc))
+  (define dst-kind (and (ast-reg? dst) (ast-reg-kind dst)))
+  (define src-kind (and (ast-reg? src) (ast-reg-kind src)))
+  (cond
+    [(and (scalar-fpr-kind? dst-kind)
+          (scalar-fpr-kind? src-kind))
+     (ast-ins 'fmov #f (list dst src) loc)]
+    [(and (vector-fpr-kind? dst-kind)
+          (vector-fpr-kind? src-kind))
+     (ast-ins 'mov #f
+              (list (vector-copy-view dst)
+                    (vector-copy-view src))
+              loc)]
+    [(and (sve-fpr-kind? dst-kind)
+          (sve-fpr-kind? src-kind))
+     (ast-ins 'orr #f
+              (list (sve-copy-view dst)
+                    (sve-copy-view src)
+                    (sve-copy-view src))
+              loc)]
+    [(and (predicate-kind? dst-kind)
+          (predicate-kind? src-kind))
+     (ast-ins 'mov #f
+              (list (predicate-copy-view dst)
+                    (predicate-copy-view src))
+              loc)]
+    [else
+     (ast-ins 'mov #f (list dst src) loc)]))
 
 (define (label-ins target loc)
   (ast-label target #f loc))
@@ -202,29 +331,48 @@
     (define actual* (adapt-bound-reg formal actual))
     (mov-ins actual* (third slot) loc)))
 
-(define (function-entry-moves params loc)
-  (for/list ([slot (in-list (function-param-slots params loc))]
+(define (function-entry-moves-from-slots slots loc)
+  (for/list ([slot (in-list slots)]
              #:when (memq (first slot) '(in inout)))
     (mov-ins (second slot) (third slot) loc)))
 
-(define (function-return-moves params loc)
-  (for/list ([slot (in-list (function-param-slots params loc))]
+(define (function-return-moves-from-slots slots loc)
+  (for/list ([slot (in-list slots)]
              #:when (memq (first slot) '(out inout)))
     (mov-ins (third slot) (second slot) loc)))
+
+(define (function-entry-moves params attrs loc)
+  (function-entry-moves-from-slots
+   (function-param-slots params loc attrs)
+   loc))
+
+(define (function-return-moves params attrs loc)
+  (function-return-moves-from-slots
+   (function-param-slots params loc attrs)
+   loc))
+
+(define (insert-after-leading-labels body inserted)
+  (let loop ([rest body] [labels '()])
+    (match rest
+      [(cons (ast-directive 'label _ _ _) tail)
+       (loop tail (cons (car rest) labels))]
+      [_ (append (reverse labels) inserted rest)])))
 
 (define (apply-function-boundary body attrs loc)
   (define params (hash-ref attrs 'function-params #f))
   (if (not params)
       body
-      (append
-       (function-entry-moves params loc)
-       (apply append
-              (for/list ([item (in-list body)])
-                (match item
-                  [(ast-ins 'ret suffix operands ret-loc)
-                   (append (function-return-moves params ret-loc)
-                           (list (ast-ins 'ret suffix operands ret-loc)))]
-                  [_ (list item)]))))))
+      (let* ([slots (function-param-slots params loc attrs)]
+             [entry-moves (function-entry-moves-from-slots slots loc)]
+             [body-with-return-moves
+              (apply append
+                     (for/list ([item (in-list body)])
+                       (match item
+                         [(ast-ins 'ret suffix operands ret-loc)
+                          (append (function-return-moves-from-slots slots ret-loc)
+                                  (list (ast-ins 'ret suffix operands ret-loc)))]
+                         [_ (list item)])))])
+        (insert-after-leading-labels body-with-return-moves entry-moves))))
 
 (define (lower-call target attrs bindings loc)
   (when (hash-ref attrs 'inline-only #f)
@@ -233,11 +381,15 @@
   (unless params
     (raise-inline-error loc ".call target has no .function signature: ~a" target))
   (validate-named-bindings 'call target params bindings loc)
-  (define slots (function-param-slots params loc))
+  (define slots (function-param-slots params loc attrs))
   (append
    (call-slot-inputs slots bindings loc)
    (list (ast-ins 'bl #f (list (label-ins target loc)) loc))
    (call-slot-outputs slots bindings loc)))
+
+(define (inline-target-params attrs)
+  (or (hash-ref attrs 'inline-params #f)
+      (hash-ref attrs 'function-params #f)))
 
 (define (rewrite-reg reg rename-symbol [bindings (hash)])
   (define rid (ast-reg-id reg))
@@ -398,7 +550,7 @@
            (unless target-body
              (raise-inline-error loc "inline 目标函数不存在: ~a" target))
            (define target-attrs (hash-ref function-attrs target (hash)))
-           (define target-params (hash-ref target-attrs 'inline-params #f))
+           (define target-params (inline-target-params target-attrs))
            (when target-params
              (validate-inline-bindings target target-params bindings loc))
            (define expanded-target
@@ -475,7 +627,7 @@
             (and (ast-directive? ins)
                  (memq (ast-directive-kind ins) '(inline call))))))))
 
-(define internal-fn-info-keys '(max-internal-align))
+(define internal-fn-info-keys '(max-internal-align function-loc))
 
 (define (fn-info->attr-hash fn)
   (for/fold ([h (hash)])
@@ -487,11 +639,12 @@
         (hash-set h k v))))
 
 (define (function->items fn)
+  (define fn-loc (fn-get-info fn 'function-loc no-srcloc))
   (define header
     (ast-directive 'function
                    (asm-function-name fn)
                    (fn-info->attr-hash fn)
-                   no-srcloc))
+                   fn-loc))
   (define (labels-for-block block)
     (define bbid (basic-block-id block))
     (sort

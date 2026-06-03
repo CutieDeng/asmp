@@ -41,7 +41,8 @@
          (only-in "../syntax/lookup.rkt"
                   encoding-info? encoding-info-encoding-id encoding-info-template)
          racket/cmdline
-         racket/format)
+         racket/format
+         racket/set)
 
 ;; ============================================================
 ;; 配置参数
@@ -508,17 +509,62 @@
 (define (inline-only-function? fn)
   (fn-get-info fn 'inline-only #f))
 
+(define (function-inline-targets fn)
+  (for*/fold ([targets (set)])
+             ([kv (in-ordered-map (asm-function-blocks fn))]
+              [ins (in-pvector (basic-block-instructions (cdr kv)))])
+    (match ins
+      [(ast-directive 'inline target _ _)
+       (if (symbol? target) (set-add targets target) targets)]
+      [_ targets])))
+
+(define (cfg-inline-targets cfg)
+  (for/fold ([targets (set)])
+            ([i (in-range (cfg-function-count cfg))])
+    (define fn (cfg-get-function cfg i))
+    (if fn
+        (set-union targets (function-inline-targets fn))
+        targets)))
+
+(define (function-bl-targets fn)
+  (for*/fold ([targets (set)])
+             ([kv (in-ordered-map (asm-function-blocks fn))]
+              [ins (in-pvector (basic-block-instructions (cdr kv)))])
+    (match ins
+      [(ast-ins 'bl #f (list (ast-label target #f _)) _)
+       (if (symbol? target) (set-add targets target) targets)]
+      [_ targets])))
+
+(define (cfg-bl-targets cfg)
+  (for/fold ([targets (set)])
+            ([i (in-range (cfg-function-count cfg))])
+    (define fn (cfg-get-function cfg i))
+    (if fn
+        (set-union targets (function-bl-targets fn))
+        targets)))
+
+(define (omit-inline-selected-function? fn inline-targets bl-targets)
+  (define name (asm-function-name fn))
+  (and (set-member? inline-targets name)
+       (not (fn-get-info fn 'export #f))
+       (not (set-member? bl-targets name))))
+
 (define (run-regalloc-stage cfg functions)
   (when (>= (verbose-level) 1)
     (eprintf "阶段 3: 寄存器分配\n"))
 
   ;; 在 CFG 构建后展开 inline 指令，确保 CFG 阶段可见原始 inline
+  (define inline-targets (cfg-inline-targets cfg))
   (define cfg* (expand-inline-cfg cfg))
+  (define bl-targets (cfg-bl-targets cfg*))
   (define functions*
     (for/list ([i (in-range (cfg-function-count cfg*))])
       (cfg-get-function cfg* i)))
   (define output-functions*
-    (filter (lambda (fn) (not (inline-only-function? fn))) functions*))
+    (filter (lambda (fn)
+              (and (not (inline-only-function? fn))
+                   (not (omit-inline-selected-function? fn inline-targets bl-targets))))
+            functions*))
 
   ;; 预加载 ABI 配置
   (load-abi-config)

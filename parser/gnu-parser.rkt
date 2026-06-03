@@ -580,7 +580,7 @@
      (error 'gnu-parser "invalid inline parameter: ~a" part)]))
 
 (define (parse-inline-params text source line)
-  (let loop ([parts (parse-paren-list text ".inline-function signature")]
+  (let loop ([parts (parse-paren-list text ".function signature")]
              [current-mode #f]
              [out '()])
     (match parts
@@ -861,9 +861,9 @@
      (define name (parse-symbol-token (car parts)))
      (define attrs (parse-asmp-attrs (cdr parts)))
      (values (list (ast-directive 'extern name (asmp-extern-args attrs) (loc source line))) st)]
-    ["asmp.save"
+    [(or "save" "asmp.save")
      (values (list (parse-save-load-directive 'save! rest source line)) st)]
-    [(or "asmp.load" "asmp.restore")
+    [(or "load" "restore" "asmp.load" "asmp.restore")
      (values (list (parse-save-load-directive 'load! rest source line)) st)]
     ["ascii"
      (values (list (ast-directive 'ascii #f (parse-string-list rest) (loc source line))) st)]

@@ -87,17 +87,17 @@ ASM
 "))
      (check-true (pvector-empty? errors)))
 
-   (test-case ".asmp.save/.asmp.restore 是允许的栈管理指令"
+   (test-case ".save/.restore 是允许的栈管理指令"
      (define errors
        (sp-write-errors
         #<<ASM
 .asmp.function f abi=aapcs64
 f:
-  .asmp.save fp, lr
+  .save fp, lr
   mov fp, sp
   str x0, [sp, #16]
   ldr x1, [sp, #16]
-  .asmp.restore fp, lr
+  .restore fp, lr
   ret
 .asmp.end_function
 ASM
