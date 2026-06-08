@@ -21,14 +21,20 @@ kernels:
 `example/009-deflate-fixed-fast.d` adds a raw fixed-Huffman deflate fast path.
 `example/013-deflate-fixed-fast.asm` is the same bootstrap design written in the
 GNU input syntax for discussing frontend syntax and macro/compile-time
-semantics:
+semantics. `example/019-deflate-fixed-chain.asm` keeps the same bitstream
+format and helpers, but replaces the one-entry match finder with a bounded
+hash-chain parser and adds an explicit raw stored-block encoder:
 
 - one final deflate block, `BFINAL=1`, `BTYPE=01`;
+- raw stored-block output for uncompressed fallback experiments, split at
+  65535-byte stored-block boundaries;
 - scalar AArch64 bit writer with LSB-first packing;
 - fixed-Huffman literal, length, distance, and EOB emission;
-- 15-bit hash table with one previous candidate per bucket;
-- fast parser with no lazy matching and no reinsertion of skipped match bytes;
-- caller-provided `uint32_t head[32768]` scratch space;
+- 15-bit hash table, either one previous candidate per bucket (`013`) or
+  `head[32768]` plus `prev[32768]` hash chains (`019`);
+- fast parser with skipped match bytes reinserted into the hash chains and a
+  one-byte lazy-match lookahead;
+- caller-provided scratch tables;
 - return value is the number of output bytes written.
 
 This is intentionally a level-1 style core. It is useful as a first assembler
@@ -41,8 +47,8 @@ locked down. In particular:
 
 - do not add static Huffman tables while the S-expression frontend lacks compact
   data directives and label-indexed loads;
-- do not add lazy matching, chains, or skipped-byte reinsertion before the raw
-  one-candidate parser has a decoder-backed test;
+- keep lazy matching conservative until each policy change has a
+  decoder-backed test and a stable compression-quality baseline;
 - keep bit-writer helpers selected with `.inline` and use `--elim` for example
   output so helper bodies are not emitted as duplicate standalone functions;
 - write helper state as `.function` virtual formals and call helpers with
@@ -63,15 +69,17 @@ locked down. In particular:
      run in this checkout.
 
 2. Better match finding
-   - Move from one-entry hash buckets to hash chains or a small bounded chain.
-   - Add lazy match selection for level-1/level-3 quality.
+   - `019-deflate-fixed-chain.asm` now has a small bounded hash chain.
+   - Extend the current one-byte lazy match into a tunable level-1/level-3
+     policy.
    - Optionally add NEON-assisted compare for extending candidate matches.
 
 3. Dynamic-Huffman blocks
    - Count literal/length and distance frequencies while parsing.
    - Build canonical Huffman codes.
    - Emit code-length trees and dynamic block headers.
-   - Keep stored-block and fixed-Huffman fallbacks for incompressible input.
+   - Keep the explicit stored-block and fixed-Huffman fallbacks for
+     incompressible input.
 
 4. Wrappers
    - Keep raw deflate as the kernel ABI.
@@ -114,6 +122,32 @@ run again. The fixed-Huffman deflate source passes parser validation,
 instruction validation, CFG construction, inline expansion, register allocation,
 emission, and an external Apple arm64 assembler smoke test.
 
-The next validation step is runtime correctness: link the emitted object into a
-small C harness, run it on AArch64 hardware or an emulator, and verify the raw
-deflate stream with a known-good inflater.
+Runtime correctness now has a native Apple arm64 zlib harness. The harness
+builds `example/019-deflate-fixed-chain.asm`, generates `asmp_deflate.h`, calls
+the public `asmp_deflate_raw_fixed`, `asmp_deflate_raw_stored`, and
+`asmp_deflate_raw_auto` wrappers, checks status/error paths, and verifies the
+raw deflate stream with zlib
+`inflateInit2(..., -MAX_WBITS)`.
+The LZ77 word-extension variant in `example/023-deflate-fixed-chain-word-extend.asm`
+has its own native roundtrip harness and is also included in the compare
+runner.
+The first NEON extension variant in
+`example/024-deflate-fixed-chain-neon-extend.asm` preserves the 023 compressed
+output, passes the same native zlib roundtrip harness shape, and is included in
+the compare runner as a hand-written source variant.
+It also keeps loose compression ceilings for repeated inputs, so allocator or
+rewrite regressions that silently turn the stream back into mostly literals are
+caught by the deflate test instead of only by manual inspection.
+
+The optimization subproject also has a native compare runner that builds the
+same public wrapper path and reports CSV against zlib fixed-Huffman level 1. It
+is suitable for manual or nightly integration/performance E2E runs; the default
+test suite should keep timing out of the pass/fail criteria until the corpus and
+variance policy are more mature.
+
+For versioned optimization experiments, benchmark notes, and the native
+roundtrip runner, see `research/deflate-optimization/`. The same subproject now
+also tracks the scalar-to-NEON/SVE LZ77 plan: vectorization starts with match
+extension after the scalar parser policy is measured, while hash-chain
+traversal remains scalar until there is evidence that a broader layout change
+is worth the complexity.

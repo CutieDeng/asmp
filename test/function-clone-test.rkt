@@ -81,6 +81,33 @@ ASM
      (check-equal? (cfg-clone-group cfg* 'helper)
                    '(helper helper$asmp.cc1)))
 
+   (test-case "cloning an exported function makes the clone private"
+     (define cfg
+       (cfg-from-gnu
+        #<<ASM
+.function public.entry export profile=c-aapcs64 ()
+entry:
+  ret
+.end
+ASM
+        ))
+     (define original (cfg-get-function-by-name cfg 'public.entry))
+     (define-values (cfg* clone)
+       (cfg-add-function-clone cfg
+                               'public.entry
+                               #:version-id 'fast0
+                               #:version-kind 'callconv
+                               #:clone-reason 'managed-callconv))
+     (check-not-false original)
+     (check-true (fn-get-info original 'export #f))
+     (check-equal? (fn-get-info original 'public-abi-profile #f) 'c-aapcs64)
+     (check-equal? (cfg-get-function-by-name cfg* 'public.entry$asmp.fast0) clone)
+     (check-false (fn-get-info clone 'export #f))
+     (check-false (fn-get-info clone 'public-abi-root? #f))
+     (check-false (fn-get-info clone 'public-abi-profile #f))
+     (check-false (fn-get-info clone 'profile #f))
+     (check-equal? (fn-logical-name clone) 'public.entry))
+
    (test-case "cfg-clone-and-rewrite-callers rewrites only selected bl callers"
      (define cfg
        (cfg-from-gnu

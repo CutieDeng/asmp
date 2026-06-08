@@ -394,7 +394,7 @@
 (define arm64-gpr-config
   (make-reg-class-config
     #:num-regs 31               ; x0-x30，x31(sp/zr) 不参与
-    #:banned (bitset 18)        ; x18 平台保留
+    #:banned (bitset 16 17 18)  ; x16/x17 reserved for rewrite temps; x18 平台保留
     #:preserved (bitset-range 19 31)  ; x19-x30 callee-saved
     #:arg-regs '(0 1 2 3 4 5 6 7)      ; x0-x7 参数寄存器
     #:return-regs '(0)))               ; x0 返回值

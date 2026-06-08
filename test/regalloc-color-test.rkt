@@ -3,12 +3,14 @@
 (require rackunit
          rackunit/text-ui
          "../parser/frontend.rkt"
+         "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi.rkt"
          "../pipeline/regalloc/types.rkt"
          "../codegen/emit.rkt"
-         "../vendor/cutie-ftree/ordered-map.rkt")
+         "../vendor/cutie-ftree/ordered-map.rkt"
+         "../vendor/cutie-ftree/pvector.rkt")
 
 (define (source->first-function source)
   (define results (parse-string source #:validate? #t))
@@ -20,6 +22,16 @@
                #:when (parse-result-ok? r))
       (parse-result-instruction r)))
   (cfg-get-function (build-cfg items) 0))
+
+(define (allocated-phys-reg result abi reg)
+  (define coalesced (alloc-result-coalesced result))
+  (define assignment (alloc-result-assignment result))
+  (define resolved (ordered-map-ref coalesced reg reg))
+  (cond
+    [(reg-id-physical? resolved) (reg-id-id resolved)]
+    [else
+     (define color (ordered-map-ref assignment resolved #f))
+     (and color (abi-color->reg abi (reg-id-class resolved) color))]))
 
 (define regalloc-color-tests
   (test-suite
@@ -90,7 +102,100 @@ ASM
      (check-not-false color)
      (define effective-abi
        (multi-class-ig-effective-abi (pipeline-result-interference result)))
-     (check-not-equal? (abi-color->reg effective-abi 'gpr color) 19))))
+     (check-not-equal? (abi-color->reg effective-abi 'gpr color) 19))
+
+   (test-case "reserved rewrite scratch registers do not capture virtual coalesces"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function reserved_scratch_coalesce (abi aapcs64))
+(: label entry)
+  (mov x.v x16)
+  (add x.use x.v x0)
+  (mov x0 x.use)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define allocation (pipeline-result-allocation result))
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (define v-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'v)))
+     (check-not-false v-phys)
+     (check-not-equal? v-phys 16)
+     (check-not-equal? v-phys 17))
+
+   (test-case "coalescing with precolored aliases respects virtual interference"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function precolored_alias_conflict (abi aapcs64))
+(: label entry)
+  (mov x.a x4)
+  (add x.b x5 x1)
+  (add x.use x.a x.b)
+  (mov x4 x.b)
+  (mov x0 x.use)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define allocation (pipeline-result-allocation result))
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (define a-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'a)))
+     (define b-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'b)))
+     (check-not-false a-phys)
+     (check-not-false b-phys)
+     (check-not-equal? a-phys b-phys))
+
+   (test-case "explicit physical interference prevents precolored coalescing"
+     (define fn0
+       (source->first-function
+        #<<ASM
+(: function explicit_physical_interference (abi aapcs64))
+(: label entry)
+(: save! all)
+  (mov x.v x0)
+  (bl callee)
+  (add x0 x.v x0)
+(: load! all)
+  (ret)
+(: label callee)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define entry (fn-entry-block fn0))
+     (define constraint
+       (ast-directive
+        'reg-interfere
+        #f
+        (list (ast-reg 'x 'v #f #f #f #f no-srcloc)
+              (ast-reg 'x 19 #f #f #f #f no-srcloc))
+        no-srcloc))
+     (define entry* (struct-copy basic-block entry
+                                  [instructions
+                                   (pvector-cons-left
+                                    (basic-block-instructions entry)
+                                    constraint)]))
+     (define fn
+       (struct-copy asm-function fn0
+                    [blocks (ordered-map-set (asm-function-blocks fn0)
+                                             (bb-id-val (basic-block-id entry))
+                                             entry*)]))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define allocation (pipeline-result-allocation result))
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (define v-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'v)))
+     (check-not-false v-phys)
+     (check-not-equal? v-phys 19))))
 
 (module+ main
   (void (run-tests regalloc-color-tests)))

@@ -40,6 +40,16 @@ clang -target aarch64-linux-gnu -c /tmp/standalone-hello.s -o /tmp/standalone-he
 # GNU 输入版 deflate 阅读/语义讨论示例
 racket cli/as.rkt --gnu-input --elim -o /tmp/deflate-fixed-fast.s example/013-deflate-fixed-fast.asm
 
+# GNU 输入版 deflate hash-chain 版本
+racket cli/as.rkt --gnu-input --elim -o /tmp/deflate-fixed-chain.s example/019-deflate-fixed-chain.asm
+
+# deflate hash-chain public C wrapper + generated header
+racket cli/as.rkt --gnu-input --apple --elim --public-c-header /tmp/asmp_deflate.h -o /tmp/deflate-fixed-chain.s example/019-deflate-fixed-chain.asm
+
+# deflate NEON match-extension variant; wrappers select the hand-written core
+# through logical `.call ... feature=neon` / `variant=neon-extend`
+racket cli/as.rkt --gnu-input --apple --elim --public-c-header /tmp/asmp_neonextend.h -o /tmp/deflate-neon-extend.s example/024-deflate-fixed-chain-neon-extend.asm
+
 # 托管 .function/.call 基础示例
 racket cli/as.rkt --gnu-input --gnu --elim -o /tmp/managed-basic.s example/014-managed-call-basic.asm
 clang -target aarch64-linux-gnu -c /tmp/managed-basic.s -o /tmp/managed-basic.o
@@ -160,6 +170,13 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 | `015-managed-call-hello.asm` | 托管函数调用包裹 C ABI `puts` 的 hello world |
 | `016-managed-call-fpr-neon.asm` | FPR 标量和 NEON 128-bit 向量托管 slot 示例 |
 | `017-managed-call-sve-registers.asm` | SVE `z` 和 predicate `p` 寄存器托管 slot 示例 |
+| `018-managed-call-abi-hint.asm` | 按调用点选择 ABI clone 的 `.call abi=...` 示例 |
+| `019-deflate-fixed-chain.asm` | fixed-Huffman deflate + 有界 hash-chain match finder + raw stored-block encoder + public auto selector |
+| `020-deflate-dynamic-litonly.asm` | literal-only dynamic Huffman deflate header/canonical-code baseline |
+| `021-deflate-dynamic-litfreq.asm` | literal/length frequency histogram helper for dynamic Huffman tree build |
+| `022-deflate-dynamic-litlen-balanced.asm` | balanced literal/length code-length helper for dynamic Huffman scaffolding |
+| `023-deflate-fixed-chain-word-extend.asm` | fixed-Huffman hash-chain deflate with 8-byte LZ77 match extension |
+| `024-deflate-fixed-chain-neon-extend.asm` | fixed-Huffman hash-chain deflate with NEON-assisted LZ77 match extension |
 
 GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs/gnu-frontend-syntax.md)。
 

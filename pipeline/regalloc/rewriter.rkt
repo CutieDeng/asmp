@@ -376,7 +376,14 @@
   (define extended-assignment
     (for/fold ([m assignment])
               ([kv (in-ordered-map temp-map)])
-      (ordered-map-set m (car kv) (cdr kv))))
+      (define reg (car kv))
+      (define temp-reg-num (cdr kv))
+      (ordered-map-set m
+                       reg
+                       (reg-id (reg-id-class reg)
+                               (canonical-width (reg-id-class reg))
+                               temp-reg-num
+                               #f))))
 
   (define new-ins (substitute-registers ins extended-assignment coalesced abi))
   (define result-with-ins (pvector-cons-right result-with-loads new-ins))
@@ -477,16 +484,22 @@
 
      (if virtual?
          (let* ([rid (reg-id class (canonical-width class) id #t)]
+                [direct-color-or-phys (ordered-map-ref assignment rid #f)]
                 [resolved-rid (ordered-map-ref coalesced rid rid)]
-                [color-or-phys (ordered-map-ref assignment resolved-rid #f)])
+                [color-or-phys (or direct-color-or-phys
+                                   (ordered-map-ref assignment resolved-rid #f))])
            (cond
-             ;; Found a mapping - could be a color or direct physical register number
+             ;; Found a mapping - either an allocator color, or an explicit
+             ;; physical reg-id used by rewrite-time spill temporaries.
              [color-or-phys
-              (let ([phys-num (abi-color->reg abi class color-or-phys)])
-                (if phys-num
-                    (ast-reg kind phys-num group-size index element pred-mode loc)
-                    ;; abi-color->reg returned #f, use as direct physical number (for temps)
-                    (ast-reg kind color-or-phys group-size index element pred-mode loc)))]
+              (cond
+                [(reg-id? color-or-phys)
+                 (ast-reg kind (reg-id-id color-or-phys) group-size index element pred-mode loc)]
+                [else
+                 (let ([phys-num (abi-color->reg abi class color-or-phys)])
+                   (if phys-num
+                       (ast-reg kind phys-num group-size index element pred-mode loc)
+                       op))])]
              ;; Check if resolved to a physical reg-id
              [(and (reg-id? resolved-rid) (reg-id-physical? resolved-rid))
               (ast-reg kind (reg-id-id resolved-rid) group-size index element pred-mode loc)]

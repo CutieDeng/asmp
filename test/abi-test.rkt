@@ -120,8 +120,8 @@
     (when naked
       (check-equal? (abi-get-arg-regs naked 'gpr) '(0 1 2 3 4 5 6 7))
       (check-equal? (abi-get-return-regs naked 'gpr) '(0))
-      ;; naked 应该有更多可分配寄存器（无 preserved）
-      (check-equal? (reg-num-allocatable (abi-config-gpr naked)) 31))))
+      ;; naked 没有 preserved，但 x16/x17 仍保留给 rewrite-time scratch。
+      (check-equal? (reg-num-allocatable (abi-config-gpr naked)) 29))))
 
 ;; ============================================================
 ;; 测试特殊寄存器
@@ -373,7 +373,9 @@
     (check-false (abi-color->reg arm64-abi 'gpr -1)))
 
   (test-case "abi-reg->color banned 寄存器返回 #f"
-    ;; x18 是 banned 寄存器
+    ;; x16/x17 是 rewrite-time scratch，x18 是平台保留寄存器。
+    (check-false (abi-reg->color arm64-abi 'gpr 16))
+    (check-false (abi-reg->color arm64-abi 'gpr 17))
     (check-false (abi-reg->color arm64-abi 'gpr 18)))
 
   (test-case "abi-reg->color 越界寄存器返回 #f"
@@ -381,7 +383,7 @@
 
   (test-case "abi-color->reg 与 abi-reg->color 互逆"
     ;; 对于可分配寄存器，color->reg 和 reg->color 互为逆操作
-    (define allocatable-regs '(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17))
+    (define allocatable-regs '(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 19 20))
     (for ([reg (in-list allocatable-regs)])
       (define color (abi-reg->color arm64-abi 'gpr reg))
       (when color

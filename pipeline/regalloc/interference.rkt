@@ -108,6 +108,11 @@
   (define index-reg (fn-liveness-index-reg liveness))
   (define num-vars (fn-liveness-num-vars liveness))
 
+  ;; 收集显式干涉约束（全局，稍后按类过滤）。约束里可能只出现
+  ;; 物理寄存器；这些寄存器也必须成为图顶点，否则 virtual-vs-physical
+  ;; 约束不会排除对应颜色。
+  (define all-interference-constraints (collect-interference-constraints fn))
+
   ;; 分类寄存器
   (define-values (gpr-regs fpr-regs pred-regs)
     (for/fold ([gprs '()] [fprs '()] [preds '()])
@@ -118,6 +123,39 @@
         [(fpr) (values gprs (cons (cons i reg) fprs) preds)]
         [(predicate) (values gprs fprs (cons (cons i reg) preds))]
         [else (values gprs fprs preds)])))
+
+  (define live-reg-map
+    (for/fold ([m (ordered-map-empty reg-id-compare)])
+              ([i (in-range num-vars)])
+      (ordered-map-set m (pvector-ref index-reg i) #t)))
+
+  (define constraint-reg-map
+    (for*/fold ([m live-reg-map])
+               ([constraint (in-list all-interference-constraints)]
+                [reg (in-list (list (car constraint) (cdr constraint)))])
+      (if (ordered-map-ref m reg #f)
+          m
+          (ordered-map-set m reg 'constraint-only))))
+
+  (define-values (gpr-regs* fpr-regs* pred-regs*)
+    (for/fold ([gprs gpr-regs]
+               [fprs fpr-regs]
+               [preds pred-regs]
+               [next-idx num-vars]
+               #:result (values gprs fprs preds))
+              ([kv (in-ordered-map constraint-reg-map)])
+      (define reg (car kv))
+      (define origin (cdr kv))
+      (cond
+        [(not (eq? origin 'constraint-only))
+         (values gprs fprs preds next-idx)]
+        [else
+         (define pair (cons next-idx reg))
+         (case (reg-id-class reg)
+           [(gpr) (values (cons pair gprs) fprs preds (add1 next-idx))]
+           [(fpr) (values gprs (cons pair fprs) preds (add1 next-idx))]
+           [(predicate) (values gprs fprs (cons pair preds) (add1 next-idx))]
+           [else (values gprs fprs preds next-idx)])])))
 
   ;; 收集 move 边（全局，稍后按类过滤）
   (define all-move-edges (collect-move-edges fn reg-index))
@@ -139,28 +177,32 @@
 
   ;; 构建各类干涉图
   (define gpr-ig
-    (if (null? gpr-regs) #f
-        (build-class-ig 'gpr (reverse gpr-regs) fn liveness
-                        all-move-edges all-groups live-across-call
+    (if (null? gpr-regs*) #f
+        (build-class-ig 'gpr (reverse gpr-regs*) fn liveness
+                        all-move-edges all-interference-constraints
+                        all-groups live-across-call
                         gpr-num-colors effective-abi)))
 
   (define fpr-ig
-    (if (null? fpr-regs) #f
-        (build-class-ig 'fpr (reverse fpr-regs) fn liveness
-                        all-move-edges all-groups live-across-call
+    (if (null? fpr-regs*) #f
+        (build-class-ig 'fpr (reverse fpr-regs*) fn liveness
+                        all-move-edges all-interference-constraints
+                        all-groups live-across-call
                         fpr-num-colors effective-abi)))
 
   (define pred-ig
-    (if (null? pred-regs) #f
-        (build-class-ig 'predicate (reverse pred-regs) fn liveness
-                        all-move-edges all-groups live-across-call
+    (if (null? pred-regs*) #f
+        (build-class-ig 'predicate (reverse pred-regs*) fn liveness
+                        all-move-edges all-interference-constraints
+                        all-groups live-across-call
                         pred-num-colors effective-abi)))
 
   (multi-class-ig gpr-ig fpr-ig pred-ig effective-abi))
 
 ;; 构建单类干涉图
 (define (build-class-ig class reg-pairs fn liveness
-                         all-move-edges all-groups live-across-call
+                         all-move-edges all-interference-constraints
+                         all-groups live-across-call
                          num-colors abi)
   ;; 创建类内索引
   (define-values (class-reg-index class-index-reg)
@@ -237,7 +279,14 @@
   (define g-with-group-edges
     (add-group-interference-edges g-with-edges class-groups class-reg-index))
 
-  (class-ig class g-with-group-edges
+  ;; 添加显式干涉约束边
+  (define g-with-constraint-edges
+    (add-explicit-interference-edges g-with-group-edges
+                                     all-interference-constraints
+                                     class-reg-index
+                                     class))
+
+  (class-ig class g-with-constraint-edges
             class-reg-index class-index-reg
             precolored colors class-move-edges class-groups
             class-live-across-call num-colors))
@@ -394,7 +443,7 @@
                         (eq? (reg-ref-position (car uses)) 'direct))
                (define src-id (reg-ref->reg-id (car uses)))
                (define dst-id (reg-ref->reg-id (car defs)))
-               (when (eq? (reg-id-class src-id) (reg-id-class dst-id))
+               (when (coalescable-move-edge? src-id dst-id)
                  (set! edges (pvector-cons-right edges (move-edge src-id dst-id))))))]
           [(and (ast-directive? ins)
                 (eq? (ast-directive-kind ins) 'weak-mov))
@@ -403,9 +452,25 @@
            (define src-reg (second args))
            (define dst-id (ast-reg->reg-id dst-reg))
            (define src-id (ast-reg->reg-id src-reg))
-           (when (eq? (reg-id-class src-id) (reg-id-class dst-id))
-             (set! edges (pvector-cons-right edges (move-edge src-id dst-id))))]))))
+              (when (coalescable-move-edge? src-id dst-id)
+                (set! edges (pvector-cons-right edges (move-edge src-id dst-id))))]))))
   edges)
+
+(define (collect-interference-constraints fn)
+  (define constraints '())
+  (fn-for-each-block fn
+    (lambda (block)
+      (for ([ins (in-pvector (basic-block-instructions block))])
+        (when (and (ast-directive? ins)
+                   (eq? (ast-directive-kind ins) 'reg-interfere))
+          (match (ast-directive-args ins)
+            [(list (? ast-reg? left) (? ast-reg? right))
+             (set! constraints
+                   (cons (cons (ast-reg->reg-id left)
+                               (ast-reg->reg-id right))
+                         constraints))]
+            [_ (void)])))))
+  (reverse constraints))
 
 ;; 为组内寄存器添加干涉边
 (define (add-group-interference-edges g groups class-reg-index)
@@ -422,6 +487,20 @@
       (if (and idx-i idx-j)
           (add-undirected-edge g idx-i idx-j)
           g))))
+
+(define (add-explicit-interference-edges g constraints class-reg-index class)
+  (for/fold ([current-g g])
+            ([constraint (in-list constraints)])
+    (define left (car constraint))
+    (define right (cdr constraint))
+    (if (and (eq? (reg-id-class left) class)
+             (eq? (reg-id-class right) class))
+        (let ([left-idx (ordered-map-ref class-reg-index left #f)]
+              [right-idx (ordered-map-ref class-reg-index right #f)])
+          (if (and left-idx right-idx (not (= left-idx right-idx)))
+              (add-undirected-edge current-g left-idx right-idx)
+              current-g))
+        current-g)))
 
 ;; 从 ast-reg 转换为 reg-id
 (define (ast-reg->reg-id reg)
@@ -443,6 +522,16 @@
 
 (define (is-call-instruction? mnem)
   (memq mnem '(bl blr)))
+
+(define (internal-snapshot-reg-id? rid)
+  (and (reg-id-virtual? rid)
+       (symbol? (reg-id-id rid))
+       (regexp-match? #rx"^__asmp_.*\\$" (symbol->string (reg-id-id rid)))))
+
+(define (coalescable-move-edge? src-id dst-id)
+  (and (eq? (reg-id-class src-id) (reg-id-class dst-id))
+       (not (internal-snapshot-reg-id? src-id))
+       (not (internal-snapshot-reg-id? dst-id))))
 
 (define (add-undirected-edge g v1 v2)
   (if (simple-graph-has-edge? g v1 v2)

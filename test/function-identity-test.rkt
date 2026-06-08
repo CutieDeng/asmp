@@ -5,6 +5,7 @@
          "../parser/frontend.rkt"
          "../parser/ast.rkt"
          "../semantic/control-flow.rkt"
+         "../semantic/function-clone.rkt"
          "../semantic/inline.rkt")
 
 (define (ok-items results)
@@ -104,11 +105,44 @@ ASM
      (check-equal? (function-version-version-id (fn-function-version helper))
                    'canonical)
      (check-equal? (fn-logical-name main-fn) 'app.main)
-     (check-true (fn-get-info main-fn 'export #f)))))
+     (check-true (fn-get-info main-fn 'export #f)))
+
+   (test-case "source variant keeps handwritten body under logical function"
+     (define cfg
+       (cfg-from-gnu
+        #<<ASM
+.function asmp.deflate.fixed ()
+entry:
+  ret
+.end
+
+.function asmp.deflate.fixed.neon-extend variant-of=asmp.deflate.fixed version=neon-extend feature=neon ()
+entry:
+  ret
+.end
+ASM
+        ))
+     (define scalar (cfg-get-function-by-name cfg 'asmp.deflate.fixed))
+     (define neon (cfg-get-function-by-name cfg 'asmp.deflate.fixed.neon-extend))
+     (check-not-false scalar)
+     (check-not-false neon)
+     (check-equal? (fn-logical-name scalar) 'asmp.deflate.fixed)
+     (check-equal? (fn-logical-name neon) 'asmp.deflate.fixed)
+     (define version (fn-function-version neon))
+     (check-false (function-version-canonical? version))
+     (check-true (function-version-clone? version))
+     (check-equal? (function-version-version-id version) 'neon-extend)
+     (check-equal? (function-version-version-kind version) 'source-variant)
+     (check-equal? (function-version-clone-reason version) 'handwritten)
+     (check-equal? (function-version-specialization-key version)
+                   '(target-feature neon))
+     (check-equal? (function-version-linkage-symbol version)
+                   'asmp.deflate.fixed.neon-extend)
+     (check-equal? (cfg-clone-group cfg 'asmp.deflate.fixed)
+                   '(asmp.deflate.fixed asmp.deflate.fixed.neon-extend)))))
 
 (module+ main
   (void (run-tests function-identity-tests)))
 
 (module+ test
   (void (run-tests function-identity-tests)))
-

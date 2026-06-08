@@ -52,6 +52,9 @@
   bb-debug-empty
   fn-debug-empty
   cfg-debug-empty
+  default-public-abi-profile
+  known-public-abi-profiles
+  known-public-abi-profile?
 
   ;; 基本块操作
   make-basic-block
@@ -63,6 +66,11 @@
   ;; 函数操作
   fn-set-info
   fn-get-info
+  fn-public-abi-root?
+  fn-public-header?
+  fn-public-abi-barrier?
+  fn-public-abi-profile
+  fn-public-abi-profile-explicit?
   fn-function-version
   fn-logical-name
   fn-linkage-symbol
@@ -207,8 +215,38 @@
   (struct-copy asm-function fn
                [info (ordered-map-set (asm-function-info fn) key value)]))
 
+(define (fn-remove-info fn key)
+  (if (ordered-map-has-key? (asm-function-info fn) key)
+      (let-values ([(info* _) (ordered-map-delete (asm-function-info fn) key)])
+        (struct-copy asm-function fn [info info*]))
+      fn))
+
+(define (fn-remove-info* fn keys)
+  (for/fold ([fn* fn])
+            ([key (in-list keys)])
+    (fn-remove-info fn* key)))
+
 (define (fn-get-info fn key [default #f])
   (ordered-map-ref (asm-function-info fn) key default))
+
+(define (fn-public-abi-root? fn)
+  (and (fn-get-info fn 'public-abi-root? #f) #t))
+
+(define (fn-public-header? fn)
+  (and (fn-public-abi-root? fn)
+       (fn-get-info fn 'public-header? #t)
+       #t))
+
+(define (fn-public-abi-barrier? fn)
+  (and (fn-public-abi-root? fn)
+       (fn-public-header? fn)
+       #t))
+
+(define (fn-public-abi-profile fn)
+  (fn-get-info fn 'public-abi-profile #f))
+
+(define (fn-public-abi-profile-explicit? fn)
+  (and (fn-get-info fn 'public-abi-profile-explicit? #f) #t))
 
 (define (fn-function-version fn)
   (or (fn-get-info fn 'function-version #f)
@@ -232,6 +270,15 @@
                                       'function-version
                                       version)]))
 
+(define public-boundary-info-keys
+  '(export
+    profile
+    public-abi-profile
+    public-abi-profile-explicit?
+    public-header?
+    public-abi-root?
+    export-profile))
+
 (define (fn-clone-version fn
                           #:version-id version-id
                           #:version-kind [version-kind 'clone]
@@ -242,7 +289,7 @@
                                              (fn-logical-name fn)
                                              version-id)])
   (fn-with-function-version
-   fn
+   (fn-remove-info* fn public-boundary-info-keys)
    (make-clone-function-version
     (fn-function-version fn)
     #:version-id version-id
@@ -293,6 +340,192 @@
    0
    cfg-debug-empty
    (ordered-map-empty symbol-compare)))
+
+(define default-public-abi-profile 'c-aapcs64)
+
+(define known-public-abi-profiles
+  '(c-aapcs64
+    apple-c-arm64
+    linux-syscall
+    kernel-aarch64
+    jit-private
+    project-abi))
+
+(define (known-public-abi-profile? profile)
+  (and (symbol? profile)
+       (if (memq profile known-public-abi-profiles) #t #f)))
+
+(define (hash-remove* h keys)
+  (for/fold ([h* h])
+            ([key (in-list keys)])
+    (hash-remove h* key)))
+
+(define (function-public-profile attrs)
+  (or (hash-ref attrs 'profile #f)
+      (hash-ref attrs 'public-abi-profile #f)
+      (hash-ref attrs 'export-profile #f)))
+
+(define known-symbol-visibilities '(public hidden local))
+
+(define (known-symbol-visibility? visibility)
+  (and (symbol? visibility)
+       (if (memq visibility known-symbol-visibilities) #t #f)))
+
+(define (header-attr-value->boolean value name)
+  (cond
+    [(boolean? value) value]
+    [(symbol? value)
+     (case value
+       [(true yes on 1 header) #t]
+       [(false no off 0 none) #f]
+       [else
+        (error 'control-flow
+               ".function ~a header expects true/false, got: ~a"
+               name
+               value)])]
+    [else
+     (error 'control-flow
+            ".function ~a header expects true/false, got: ~v"
+            name
+            value)]))
+
+(define (function-public-header-attr attrs name)
+  (define has-header? (hash-has-key? attrs 'header))
+  (define has-public-header? (hash-has-key? attrs 'public-header?))
+  (define no-header? (or (hash-ref attrs 'no-header #f)
+                         (hash-ref attrs 'noheader #f)))
+  (when (and (or has-header? has-public-header?) no-header?)
+    (error 'control-flow
+           ".function ~a cannot combine header and no-header"
+           name))
+  (cond
+    [has-public-header?
+     (values #t (header-attr-value->boolean (hash-ref attrs 'public-header?) name))]
+    [has-header?
+     (values #t (header-attr-value->boolean (hash-ref attrs 'header) name))]
+    [no-header? (values #t #f)]
+    [else (values #f #f)]))
+
+(define (normalize-function-visibility attrs name)
+  (define visibility (hash-ref attrs 'visibility #f))
+  (when (and visibility (not (known-symbol-visibility? visibility)))
+    (error 'control-flow
+           ".function ~a uses unknown visibility: ~a"
+           name
+           visibility))
+  visibility)
+
+(define (normalize-function-public-abi attrs name)
+  (define export? (hash-ref attrs 'export #f))
+  (define profile (function-public-profile attrs))
+  (define visibility (normalize-function-visibility attrs name))
+  (define-values (has-public-header-attr? public-header?)
+    (function-public-header-attr attrs name))
+  (when (and profile (not export?))
+    (error 'control-flow
+           ".function ~a uses profile=~a without export"
+           name
+           profile))
+  (when (and profile (not (symbol? profile)))
+    (error 'control-flow
+           ".function ~a profile expects profile=<name>, got: ~v"
+           name
+           profile))
+  (when (and profile (not (known-public-abi-profile? profile)))
+    (error 'control-flow
+           ".function ~a uses unknown public ABI profile: ~a"
+           name
+           profile))
+  (define explicit-profile? (and profile #t))
+  (define attrs/base
+    (hash-remove* attrs
+                  '(profile
+                    public-abi-profile
+                    export-profile
+                    header
+                    no-header
+                    noheader
+                    public-header?)))
+  (define attrs/visibility
+    (if visibility
+        (hash-set attrs/base 'visibility visibility)
+        attrs/base))
+  (define attrs/header
+    (if has-public-header-attr?
+        (hash-set attrs/visibility 'public-header? public-header?)
+        attrs/visibility))
+  (if export?
+      (hash-set (hash-set
+                 (hash-set attrs/header
+                           'public-abi-profile
+                           (or profile default-public-abi-profile))
+                 'public-abi-profile-explicit?
+                 explicit-profile?)
+                'public-abi-root? #t)
+      attrs/base))
+
+(define (function-variant-specialization-key attrs)
+  (define feature (hash-ref attrs 'target-feature #f))
+  (and feature
+       (list 'target-feature feature)))
+
+(define (make-source-function-version name attrs loc)
+  (define logical-name (hash-ref attrs 'variant-of #f))
+  (define version-id (hash-ref attrs 'version-id #f))
+  (when (and version-id (not logical-name))
+    (error 'control-flow
+           ".function ~a uses version=~a without variant-of=<logical-function>"
+           name
+           version-id))
+  (when (and logical-name (equal? logical-name name))
+    (error 'control-flow
+           ".function ~a cannot be a variant of itself"
+           name))
+  (if logical-name
+      (make-clone-function-version
+       (make-canonical-function-version logical-name
+                                        #:debug-origin loc
+                                        #:linkage-symbol logical-name)
+       #:version-id (or version-id name)
+       #:version-kind 'source-variant
+       #:clone-reason 'handwritten
+       #:specialization-key (function-variant-specialization-key attrs)
+       #:debug-origin loc
+       #:linkage-symbol name)
+      (make-canonical-function-version name
+                                       #:debug-origin loc
+                                       #:linkage-symbol name)))
+
+(define function-clone-groups-info-key 'function-clone-groups)
+
+(define (append-unique xs x)
+  (if (member x xs)
+      xs
+      (append xs (list x))))
+
+(define (front-unique xs x)
+  (cons x (filter (lambda (item) (not (equal? item x))) xs)))
+
+(define (cfg-record-function-version-group cfg fn)
+  (define version (fn-function-version fn))
+  (define logical-name (function-version-logical-name version))
+  (define groups (cfg-get-info cfg function-clone-groups-info-key (hash)))
+  (define existing (hash-ref groups logical-name '()))
+  (define updated
+    (cond
+      [(function-version-canonical? version)
+       (and (hash-has-key? groups logical-name)
+            (front-unique existing logical-name))]
+      [else
+       (define with-canonical
+         (if (cfg-get-function-by-name cfg logical-name)
+             (append-unique existing logical-name)
+             existing))
+       (append-unique with-canonical (asm-function-name fn))]))
+  (if updated
+      (cfg-set-info cfg function-clone-groups-info-key
+                    (hash-set groups logical-name updated))
+      cfg))
 
 (define module-directive-kinds
   '(section align global label ascii asciz byte byte2 byte4 byte8 byte16 byte32))
@@ -363,7 +596,9 @@
        (struct-copy control-flow-graph cfg
                     [next-fn-id (add1 fn-id)]))
      ;; attrs 是 hash，保存到 builder 中
-     (define attrs0 (if (hash? attrs) attrs (hash)))
+     (define attrs0 (normalize-function-public-abi
+                     (if (hash? attrs) attrs (hash))
+                     name))
      (define attrs/function-loc
        (hash-set attrs0 'function-loc loc))
      (define fn-attrs
@@ -371,9 +606,7 @@
            attrs/function-loc
            (hash-set attrs/function-loc
                      'function-version
-                     (make-canonical-function-version name
-                                                      #:debug-origin loc
-                                                      #:linkage-symbol name))))
+                     (make-source-function-version name attrs/function-loc loc))))
      (builder new-cfg fn-id name fn-attrs '() (builder-next-bb-id b1))]
 
     [(ast-directive 'end-function _ _ _)
@@ -429,7 +662,7 @@
                  ([(k v) (in-hash fn-attrs)])
          (fn-set-info f k v)))
 
-     (define new-cfg
+     (define new-cfg0
        (struct-copy control-flow-graph cfg
                     [functions (ordered-map-set
                                 (control-flow-graph-functions cfg)
@@ -437,6 +670,8 @@
                     [fn-names (ordered-map-set
                                (control-flow-graph-fn-names cfg)
                                fn-name fn-id)]))
+     (define new-cfg
+       (cfg-record-function-version-group new-cfg0 fn))
 
      (builder new-cfg #f #f (hash) '() next-bb-id)]))
 
@@ -501,8 +736,8 @@
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]
-        ;; 保留 save!/load!/weak-mov/inline/call 指令在指令流中
-        [(ast-directive (or 'save! 'load! 'weak-mov 'inline 'call) _ _ _)
+        ;; 保留 save!/load!/weak-mov/inline/call/reg-interfere 指令在指令流中
+        [(ast-directive (or 'save! 'load! 'weak-mov 'inline 'call 'reg-interfere) _ _ _)
          (values (pvector-cons-right instructions item)
                  label-positions
                  max-align)]

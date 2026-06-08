@@ -22,7 +22,7 @@
 (aapcs64
   (gpr
     (num-regs 31)
-    (banned #x40000)           ; x18 平台保留
+    (banned #x70000)           ; x16/x17 为重写器临时寄存器，x18 平台保留
     (preserved #x7FF80000)     ; x19-x30 callee-saved
     (args 0 1 2 3 4 5 6 7)     ; x0-x7 参数
     (return 0))                ; x0 返回值
@@ -46,14 +46,14 @@
   (extends aapcs64)
   (gpr
     (num-regs 31)
-    (banned #x40000)
+    (banned #x70000)
     (preserved #x1FF80000)))   ; 只保存 x19-x28 (无 x29/x30)
 
 ;; 裸函数 - 完全手动控制
 (naked
   (gpr
     (num-regs 31)
-    (banned #x0)
+    (banned #x30000)           ; x16/x17 为重写器临时寄存器
     (preserved #x0)
     (args 0 1 2 3 4 5 6 7)
     (return 0))

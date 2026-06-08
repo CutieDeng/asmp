@@ -165,6 +165,20 @@
 (define (emit-asm-symbol/port name port [prefix ""])
   (port-write-string port (asm-symbol-token name prefix)))
 
+(define (emit-symbol-visibility/port fn-name visibility port prefix config)
+  (case visibility
+    [(hidden)
+     (case (emit-config-syntax config)
+       [(apple)
+        (port-write-string port ".private_extern ")
+        (emit-asm-symbol/port fn-name port prefix)
+        (port-newline port)]
+       [else
+        (port-write-string port ".hidden ")
+        (emit-asm-symbol/port fn-name port prefix)
+        (port-newline port)])]
+    [else (void)]))
+
 ;; ============================================================
 ;; 端口输出辅助函数
 ;; ============================================================
@@ -269,6 +283,11 @@
       (format "~a.~a" prefix (reg-id-id r))
       (format "~a~a" prefix (reg-id-id r))))
 
+(define (debug-internal-reg-id? r)
+  (and (reg-id-virtual? r)
+       (symbol? (reg-id-id r))
+       (regexp-match? #rx"^__asmp_" (symbol->string (reg-id-id r)))))
+
 (define (debug-alloc-record-empty? record)
   (define alloc (hash-ref record 'allocation #f))
   (or (not alloc)
@@ -309,7 +328,8 @@
     [else #f]))
 
 (define (debug-record-view-specs record)
-  (for/list ([view (in-list (hash-ref record 'views '()))])
+  (for/list ([view (in-list (hash-ref record 'views '()))]
+             #:unless (debug-internal-reg-id? (hash-ref view 'reg)))
     (debug-variable-spec (hash-ref view 'reg)
                          (hash-ref view 'name)
                          (hash-ref view 'byte-size))))
@@ -326,7 +346,8 @@
                #:when (reg-id-virtual? (car kv)))
       (car kv)))
   (define candidate-regs
-    (remove-duplicates (append assigned-regs coalesced-regs)))
+    (filter (lambda (reg) (not (debug-internal-reg-id? reg)))
+            (remove-duplicates (append assigned-regs coalesced-regs))))
   (for/list ([reg (in-list candidate-regs)])
     (debug-variable-spec reg
                          (debug-reg-id->name reg)
@@ -1197,8 +1218,8 @@
      (emit-sized-data-values/port kind args port)
      #t]
 
-    ;; save!/load!/weak-mov - 不直接输出 (由寄存器分配器处理)
-    [(save! load! weak-mov) #f]
+    ;; save!/load!/weak-mov/reg-interfere - 不直接输出 (由寄存器分配器处理)
+    [(save! load! weak-mov reg-interfere) #f]
 
     ;; 其他
     [else
@@ -1318,10 +1339,12 @@
 
     ;; 函数头 - 仅在有 (export) 属性时输出 .globl
     (define is-export? (fn-get-info fn 'export #f))
-    (when is-export?
+    (define visibility (fn-get-info fn 'visibility #f))
+    (when (and is-export? (not (eq? visibility 'local)))
       (port-write-string port ".globl ")
       (emit-asm-symbol/port fn-name port prefix)
-      (port-newline port))
+      (port-newline port)
+      (emit-symbol-visibility/port fn-name visibility port prefix config))
 
     ;; 对齐指令 (使用函数属性或默认值)
     (port-write-string port ".p2align ")

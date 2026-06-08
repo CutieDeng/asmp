@@ -29,6 +29,8 @@
          "../semantic/branch-info.rkt"
          "../semantic/control-flow.rkt"
          "../semantic/inline.rkt"
+         "../semantic/ipa-callconv.rkt"
+         "../semantic/public-abi.rkt"
          "../semantic/save-verify.rkt"
          "../pipeline/pipeline.rkt"
          "../pipeline/regalloc/abi-config.rkt"
@@ -51,6 +53,8 @@
 ;; 输出控制
 (define output-file (make-parameter #f))
 (define output-stdout (make-parameter #f))
+(define public-abi-manifest-file (make-parameter #f))
+(define public-c-header-file (make-parameter #f))
 
 ;; 阶段控制
 (define stop-after (make-parameter 'emit))  ; 'parse | 'validate | 'cfg | 'regalloc | 'emit
@@ -72,6 +76,11 @@
 (define allow-spill (make-parameter #t))
 (define max-regalloc-iters (make-parameter 10))
 (define regalloc-debug (make-parameter 0))
+
+;; IPA / ABI clone planning
+(define ipa-callconv-candidate-abis (make-parameter '()))
+(define ipa-callconv-min-savings (make-parameter 1))
+(define ipa-callconv-report (make-parameter #f))
 
 ;; 格式化
 (define format-mode (make-parameter 'text))  ; 'text | 'json | 'dot | 'sexp
@@ -107,6 +116,13 @@
 
 (define (should-dump? what)
   (member what (dump-flags)))
+
+(define (parse-comma-symbols text)
+  (filter values
+          (for/list ([part (in-list (string-split text ","))])
+            (define trimmed (string-trim part))
+            (and (not (string=? trimmed ""))
+                 (string->symbol trimmed)))))
 
 ;; ============================================================
 ;; 诊断格式化
@@ -429,6 +445,12 @@
               ([err (in-pvector sp-write-findings)])
       (pvector-cons-right msgs (format-sp-write-error err))))
 
+  ;; Public ABI profile checks
+  (define public-abi-msgs
+    (for/fold ([msgs (pvector-empty)])
+              ([err (in-list (check-public-abi-profiles cfg))])
+      (pvector-cons-right msgs (format-public-abi-error err))))
+
   (when (eq? (sp-write-policy) 'warn)
     (for ([msg (in-pvector sp-write-msgs)])
       (eprintf "警告: ~a\n" msg)))
@@ -450,7 +472,8 @@
                                                                  (pvector-append (if (eq? (sp-write-policy) 'error)
                                                                                      sp-write-msgs
                                                                                      (pvector-empty))
-                                                                                 pedantic-warnings)))))
+                                                                                 (pvector-append public-abi-msgs
+                                                                                                 pedantic-warnings))))))
 
   (when (>= (verbose-level) 1)
     (eprintf "  CFG: ~a 个函数\n" fn-count))
@@ -549,13 +572,79 @@
        (not (fn-get-info fn 'export #f))
        (not (set-member? bl-targets name))))
 
+(define (format-ipa-callconv-report-line report)
+  (format "~a -> ~a: ~a cost ~a -> ~a cost ~a (save ~a move~a)"
+          (callconv-selection-report-caller report)
+          (callconv-selection-report-callee report)
+          (callconv-selection-report-baseline-abi report)
+          (callconv-selection-report-baseline-cost report)
+          (callconv-selection-report-selected-abi report)
+          (callconv-selection-report-selected-cost report)
+          (callconv-selection-report-savings report)
+          (if (= (callconv-selection-report-savings report) 1) "" "s")))
+
+(define (run-ipa-callconv-planner cfg)
+  (define candidates (ipa-callconv-candidate-abis))
+  (define hinted-selections (collect-callconv-hint-selections cfg))
+  (define hinted-edges
+    (for/set ([selection (in-list hinted-selections)])
+      (cons (callconv-selection-caller selection)
+            (callconv-selection-callee selection))))
+  (define-values (planned-selections reports)
+    (if (null? candidates)
+        (values '() '())
+        (plan-callconv-selections
+         cfg
+         #:candidate-abis candidates
+         #:min-move-savings (ipa-callconv-min-savings))))
+  (define planned-selections*
+    (filter (lambda (selection)
+              (not (set-member?
+                    hinted-edges
+                    (cons (callconv-selection-caller selection)
+                          (callconv-selection-callee selection)))))
+            planned-selections))
+  (define reports*
+    (filter (lambda (report)
+              (not (set-member?
+                    hinted-edges
+                    (cons (callconv-selection-report-caller report)
+                          (callconv-selection-report-callee report)))))
+            reports))
+  (define selections (append hinted-selections planned-selections*))
+  (if (null? selections)
+      (values cfg '() '())
+      (let ()
+        (define-values (cfg* summaries)
+          (apply-callconv-selections cfg selections))
+        (when (or (ipa-callconv-report) (>= (verbose-level) 1))
+          (when (pair? hinted-selections)
+            (eprintf "  IPA callconv: ~a source hint~a\n"
+                     (length hinted-selections)
+                     (if (= (length hinted-selections) 1) "" "s")))
+          (cond
+            [(and (null? hinted-selections)
+                  (null? reports*)
+                  (null? planned-selections*))
+             (eprintf "  IPA callconv: no profitable managed .call clones\n")]
+            [else
+             (when (pair? reports*)
+               (eprintf "  IPA callconv: ~a planned clone selection~a\n"
+                        (length reports*)
+                        (if (= (length reports*) 1) "" "s")))
+             (for ([report (in-list reports*)])
+               (eprintf "    ~a\n" (format-ipa-callconv-report-line report)))]))
+        (values cfg* selections summaries))))
+
 (define (run-regalloc-stage cfg functions)
   (when (>= (verbose-level) 1)
     (eprintf "阶段 3: 寄存器分配\n"))
 
   ;; 在 CFG 构建后展开 inline 指令，确保 CFG 阶段可见原始 inline
-  (define inline-targets (cfg-inline-targets cfg))
-  (define cfg* (expand-inline-cfg cfg))
+  (define-values (cfg/ipa _ipa-selections _ipa-summaries)
+    (run-ipa-callconv-planner cfg))
+  (define inline-targets (cfg-inline-targets cfg/ipa))
+  (define cfg* (expand-inline-cfg cfg/ipa))
   (define bl-targets (cfg-bl-targets cfg*))
   (define functions*
     (for/list ([i (in-range (cfg-function-count cfg*))])
@@ -685,6 +774,11 @@
       (format "~a.~a" prefix (reg-id-id r))
       (format "~a~a" prefix (reg-id-id r))))
 
+(define (debug-internal-reg-id? r)
+  (and (reg-id-virtual? r)
+       (symbol? (reg-id-id r))
+       (regexp-match? #rx"^__asmp_" (symbol->string (reg-id-id r)))))
+
 (define (debug-phys-reg->string reg id)
   (case (reg-id-class reg)
     [(gpr) (format "~a~a" (if (<= (reg-id-width reg) 32) "w" "x") id)]
@@ -713,15 +807,18 @@
     (hash-ref view 'name)))
 
 (define (debug-display-names record reg)
-  (define names (debug-view-names record reg))
-  (if (null? names)
-      (list (debug-reg-id->string reg))
-      names))
+  (if (debug-internal-reg-id? reg)
+      '()
+      (let ([names (debug-view-names record reg)])
+        (if (null? names)
+            (list (debug-reg-id->string reg))
+            names))))
 
 (define (debug-virtual-assignment-lines record alloc abi)
   (append*
    (for/list ([kv (in-ordered-map (alloc-result-assignment alloc))]
-              #:when (reg-id-virtual? (car kv)))
+              #:when (and (reg-id-virtual? (car kv))
+                          (not (debug-internal-reg-id? (car kv)))))
      (define reg (car kv))
      (define color (cdr kv))
      (for/list ([name (in-list (debug-display-names record reg))])
@@ -732,7 +829,9 @@
 (define (debug-coalesced-lines record alloc)
   (append*
    (for/list ([kv (in-ordered-map (alloc-result-coalesced alloc))]
-              #:when (reg-id-virtual? (car kv)))
+              #:when (and (reg-id-virtual? (car kv))
+                          (not (debug-internal-reg-id? (car kv)))
+                          (not (debug-internal-reg-id? (cdr kv)))))
      (for/list ([name (in-list (debug-display-names record (car kv)))])
        (format "~a -> ~a"
                name
@@ -741,7 +840,8 @@
 (define (debug-spilled-lines record alloc)
   (append*
    (for/list ([reg (in-pvector (alloc-result-spilled alloc))]
-              #:when (reg-id-virtual? reg))
+              #:when (and (reg-id-virtual? reg)
+                          (not (debug-internal-reg-id? reg))))
      (debug-display-names record reg))))
 
 (define (debug-allocation-record-empty? record)
@@ -940,6 +1040,22 @@
     (display (format-errors (cfg-stage-result-errors cfg-result) "CFG"))
     (exit 1))
 
+  (when (public-abi-manifest-file)
+    (write-public-abi-manifest
+     (public-abi-manifest (cfg-stage-result-cfg cfg-result))
+     (public-abi-manifest-file))
+    (when (>= (verbose-level) 1)
+      (eprintf "Public ABI manifest 写入: ~a\n"
+               (public-abi-manifest-file))))
+
+  (when (public-c-header-file)
+    (write-public-c-header
+     (public-abi-manifest (cfg-stage-result-cfg cfg-result))
+     (public-c-header-file))
+    (when (>= (verbose-level) 1)
+      (eprintf "Public C header 写入: ~a\n"
+               (public-c-header-file))))
+
   (unless (should-run-stage? 'regalloc)
     (case (format-mode)
       [(dot)
@@ -1041,6 +1157,14 @@
       "强制输出到 stdout"
       (output-stdout #t)]
 
+     [("--public-abi-manifest") file
+      "写出 public ABI manifest (rktd)"
+      (public-abi-manifest-file file)]
+
+     [("--public-c-header") file
+      "写出 public C header"
+      (public-c-header-file file)]
+
      ;; 阶段控制
      [("-S" "--stop-after") stage
       "在指定阶段后停止 (parse|validate|cfg|regalloc|emit)"
@@ -1111,6 +1235,18 @@
      [("--max-iters") n
       "最大寄存器分配迭代次数"
       (max-regalloc-iters (string->number n))]
+
+     [("--ipa-callconv-candidates") names
+      "启用 IPA callconv clone planner，逗号分隔候选 ABI"
+      (ipa-callconv-candidate-abis (parse-comma-symbols names))]
+
+     [("--ipa-callconv-min-savings") n
+      "IPA callconv planner 的最小 move 节省"
+      (ipa-callconv-min-savings (string->number n))]
+
+     [("--ipa-callconv-report")
+      "输出 IPA callconv clone planner 报告"
+      (ipa-callconv-report #t)]
 
      ;; 格式
      [("-f" "--format") fmt
@@ -1228,6 +1364,8 @@
  ;; 参数
  output-file
  output-stdout
+ public-abi-manifest-file
+ public-c-header-file
  stop-after
  dump-flags
  verbose-level
@@ -1238,6 +1376,9 @@
  emit-cfi
  allow-spill
  max-regalloc-iters
+ ipa-callconv-candidate-abis
+ ipa-callconv-min-savings
+ ipa-callconv-report
  format-mode
  continue-on-error
  show-hints

@@ -21,6 +21,7 @@
 (define-runtime-path standalone-hello-source "../example/011-gnu-standalone-hello.asm")
 (define-runtime-path macos-hello-source "../example/012-macos-standalone-hello.asm")
 (define-runtime-path deflate-asm-source "../example/013-deflate-fixed-fast.asm")
+(define-runtime-path deflate-chain-asm-source "../example/019-deflate-fixed-chain.asm")
 (define-runtime-path abi-config-source "../config/abi.rktd")
 
 (define (parse-gnu source #:validate? [validate? #t])
@@ -242,6 +243,60 @@ ASM
      (check-false (regexp-match? #rx"^df_flush8:" rendered))
      (check-not-false (regexp-match? #rx"ubfm w[0-9]+, w[0-9]+, #0, #14" rendered)))
 
+   (test-case "GNU deflate hash-chain example compiles with managed frame directives"
+     (parameterize ([abi-config-path abi-config-source])
+       (reload-abi-config abi-config-source #:force? #t)
+       (define results (parse-file deflate-chain-asm-source #:syntax 'gnu #:validate? #t))
+       (check-equal? (parse-results-error-count results) 0)
+       (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+       (define fn (cfg-get-function-by-name cfg 'deflate_fixed_chain_aarch64_asm))
+       (check-not-false fn)
+       (define rendered
+         (parameterize ([current-emit-config default-emit-config])
+           (emit-function/result (run-pipeline fn default-pipeline-config))))
+       (check-not-false (regexp-match? #rx"\\.globl deflate_fixed_chain_aarch64_asm" rendered))
+       (check-false (regexp-match? #rx"^df_flush8:" rendered))
+       (check-false (regexp-match? #rx"^df_insert_hash_pos:" rendered))
+       (check-false (regexp-match? #rx"^df_search_chain:" rendered))
+       (check-not-false (regexp-match? #rx"stp x29, x30" rendered))
+       (check-not-false (regexp-match? #rx"emit_current_match" rendered))
+       (check-not-false (regexp-match? #rx"reinsert_skipped_loop" rendered))
+       (check-not-false (regexp-match? #rx"ubfm w[0-9]+, w[0-9]+, #0, #14" rendered))))
+
+   (test-case "deflate public wrapper calls hidden raw kernel through managed .call"
+     (define results (parse-file deflate-chain-asm-source #:syntax 'gnu #:validate? #t))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define wrapper (cfg-get-function-by-name cfg 'asmp_deflate_raw_fixed))
+     (check-not-false wrapper)
+     (define insns '())
+     (fn-for-each-block
+      wrapper
+      (lambda (block)
+        (set! insns
+              (append insns
+                      (for/list ([ins (in-pvector (basic-block-instructions block))])
+                        ins)))))
+     (define bl-index
+       (for/first ([ins (in-list insns)]
+                   [i (in-naturals)]
+                   #:when (and (ast-ins? ins)
+                               (eq? (ast-ins-mnemonic ins) 'bl)
+                               (match (ast-ins-operands ins)
+                                 [(list (? ast-label? label))
+                                  (eq? (ast-label-name label)
+                                       'deflate_fixed_chain_aarch64_asm)]
+                                 [_ #f])))
+         i))
+     (check-not-false bl-index)
+     (define writeback (list-ref insns (add1 bl-index)))
+     (check-equal? (ast-ins-mnemonic writeback) 'mov)
+     (match (ast-ins-operands writeback)
+       [(list (? ast-reg? dst) (? ast-reg? src))
+        (check-equal? (ast-reg-id dst) 'written)
+        (check-equal? (ast-reg-id src) 0)]
+       [_ (fail-check "expected .call output writeback move")]))
+
    (test-case "--debug-reg-map keeps pre-rewrite allocation records"
      (define results (parse-file deflate-asm-source #:syntax 'gnu #:validate? #t))
      (check-equal? (parse-results-error-count results) 0)
@@ -308,6 +363,209 @@ ASM
                          #rx"未声明参数")
      (check-inline-error ".inline copy (x.src=x0, x.src=x1, x.dst=x2)"
                          #rx"重复绑定参数"))
+
+   (test-case ".function public C entry lowers ABI live-ins directly"
+     (define results
+       (parse-gnu #<<ASM
+.function api.entry export profile=c-aapcs64 (
+  in: x.dst,
+  in: x.dst_cap,
+  in: x.dst_len,
+  in: x.src,
+  in: x.src_len,
+  in: x.scratch,
+  in: x.scratch_len,
+  out: w.status
+)
+entry:
+  cmp x.dst_cap, x.src_len
+  b.lo small
+  mov w.status, #0
+  ret
+small:
+  mov w.status, #1
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'api.entry))
+     (check-not-false fn)
+     (define entry-block (fn-entry-block fn))
+     (check-not-false entry-block)
+     (define entry-insns (basic-block-instructions entry-block))
+     (define entry-prefix
+       (for/list ([ins (in-pvector entry-insns)]
+                  [i (in-range 28)])
+         ins))
+     (check-equal? (length entry-prefix) 28)
+     (define constraints (take entry-prefix 21))
+     (define first-moves (drop entry-prefix 21))
+     (check-equal? (length constraints) 21)
+     (for ([constraint (in-list constraints)])
+       (check-true (ast-directive? constraint))
+       (check-equal? (ast-directive-kind constraint) 'reg-interfere)
+       (match (ast-directive-args constraint)
+         [(list (? ast-reg? formal) (? ast-reg? livein))
+          (check-true (symbol? (ast-reg-id formal)))
+          (check-true (integer? (ast-reg-id livein)))]
+         [_ (fail-check "expected reg-interfere formal/livein args")]))
+     (check-equal? (map (lambda (constraint)
+                          (ast-reg-id (second (ast-directive-args constraint))))
+                        (take constraints 6))
+                   '(1 2 3 4 5 6))
+     (for ([index (in-range 7)])
+       (define formal-move (list-ref first-moves index))
+       (check-equal? (ast-ins-mnemonic formal-move) 'mov)
+       (define formal-dst (first (ast-ins-operands formal-move)))
+       (define formal-src (second (ast-ins-operands formal-move)))
+       (check-true (symbol? (ast-reg-id formal-dst)))
+       (check-equal? (ast-reg-id formal-src) index))
+     (for ([block (in-list (fn-exit-blocks fn))])
+       (define insns (for/list ([ins (in-pvector (basic-block-instructions block))]) ins))
+       (check-true (>= (length insns) 2))
+       (define return-move (list-ref insns (- (length insns) 2)))
+       (define ret-ins (last insns))
+       (check-equal? (ast-ins-mnemonic return-move) 'mov)
+       (check-equal? (ast-ins-mnemonic ret-ins) 'ret)
+       (define return-dst (first (ast-ins-operands return-move)))
+       (check-equal? (ast-reg-kind return-dst) 'w)
+       (check-equal? (ast-reg-id return-dst) 0))
+     (define pipeline-result (run-pipeline fn default-pipeline-config))
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result pipeline-result)))
+     (check-false (regexp-match? #px"mov x1, x3(.|\n)*cmp x1," rendered))
+     (define dwarf-rendered
+       (parameterize ([current-emit-config
+                       (struct-copy emit-config default-emit-config
+                                    [emit-debug-info? #t])])
+         (emit-function/result pipeline-result)))
+     (check-false (regexp-match? #rx"__asmp_entry_arg" dwarf-rendered))
+     (define reg-map-rendered
+       (parameterize ([cli:asm-syntax 'gnu]
+                      [cli:emit-debug-reg-map #t]
+                      [cli:emit-debug-lines #f]
+                      [cli:emit-cfi #f])
+         (cli:emit-stage-result-assembly
+          (cli:run-emit-stage (list pipeline-result)))))
+     (check-false (regexp-match? #rx"__asmp_entry_arg" reg-map-rendered)))
+
+   (test-case ".function entry ABI moves are inserted after leading save"
+     (define results
+       (parse-gnu #<<ASM
+.function api.save_entry export profile=c-aapcs64 (
+  in: x.dst_len,
+  out: w.status
+)
+entry:
+  .save all
+  cbz x.dst_len, bad
+  str xzr, [x.dst_len]
+  mov w.status, #0
+  .restore all
+  ret
+bad:
+  mov w.status, #3
+  .restore all
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'api.save_entry))
+     (check-not-false fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (define save-pos (car (regexp-match-positions #rx"stp x29, x30" rendered)))
+     (define entry-move-pos (car (regexp-match-positions #rx"mov x[0-9]+, x0" rendered)))
+     (check-true (< (car save-pos) (car entry-move-pos))))
+
+   (test-case ".function return moves are inserted before trailing restore"
+     (define results
+       (parse-gnu #<<ASM
+.function api.status export profile=c-aapcs64 (
+  out: w.status
+)
+entry:
+  .save all
+  mov w.status, #7
+  .restore all
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'api.status))
+     (check-not-false fn)
+     (define entry-block (fn-entry-block fn))
+     (check-not-false entry-block)
+     (define insns (for/list ([ins (in-pvector (basic-block-instructions entry-block))]) ins))
+     (define return-move-index
+       (for/first ([ins (in-list insns)]
+                   [i (in-naturals)]
+                   #:when (and (ast-ins? ins)
+                               (eq? (ast-ins-mnemonic ins) 'mov)
+                               (ast-reg? (first (ast-ins-operands ins)))
+                               (eq? (ast-reg-kind (first (ast-ins-operands ins))) 'w)
+                               (equal? (ast-reg-id (first (ast-ins-operands ins))) 0)))
+         i))
+     (define restore-index
+       (for/first ([ins (in-list insns)]
+                   [i (in-naturals)]
+                   #:when (and (ast-directive? ins)
+                               (eq? (ast-directive-kind ins) 'load!)))
+         i))
+     (check-not-false return-move-index)
+     (check-not-false restore-index)
+     (check-true (< return-move-index restore-index)))
+
+   (test-case ".function return slot constraints prevent allocated hidden swaps"
+     (define results
+       (parse-gnu #<<ASM
+.function api.pair abi=aapcs64 (
+  out: x.left,
+  out: x.right
+)
+entry:
+  mov x.left, x1
+  mov x.right, x0
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'api.pair))
+     (check-not-false fn)
+     (define insns
+       (for/list ([ins (in-pvector (basic-block-instructions (fn-entry-block fn)))])
+         ins))
+     (define (reg-id? value kind id)
+       (and (ast-reg? value)
+            (eq? (ast-reg-kind value) kind)
+            (equal? (ast-reg-id value) id)))
+     (define (has-interference? formal-id slot-id)
+       (for/or ([ins (in-list insns)])
+         (and (ast-directive? ins)
+              (eq? (ast-directive-kind ins) 'reg-interfere)
+              (match (ast-directive-args ins)
+                [(list left right)
+                 (and (reg-id? left 'x formal-id)
+                      (reg-id? right 'x slot-id))]
+                [_ #f]))))
+     (check-true (has-interference? 'left 1))
+     (check-true (has-interference? 'right 0))
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (check-false
+      (regexp-match? #rx"mov x0, x1\n    mov x1, x0\n    ret"
+                     rendered)))
 
    (test-case ".inline-function remains a compatibility alias"
      (define results
@@ -434,6 +692,8 @@ ASM
      (check-not-false main-fn)
      (check-false (fn-get-info helper 'export #f))
      (check-true (fn-get-info main-fn 'export #f))
+     (check-true (fn-get-info main-fn 'public-abi-root? #f))
+     (check-equal? (fn-get-info main-fn 'public-abi-profile #f) 'c-aapcs64)
      (define rendered
        (parameterize ([current-emit-config default-emit-config])
          (string-join
@@ -446,6 +706,79 @@ ASM
      (check-not-false (regexp-match? #rx"Lmy_lib_hash_v1\\$entry:" rendered))
      (check-not-false (regexp-match? #rx"Lcrypto_deflate_main\\$entry:" rendered))
      (check-false (regexp-match? #rx"(^|\n)entry:" rendered)))
+
+   (test-case ".call can select a handwritten source variant"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.match.scalar (
+  inout: x.value
+)
+entry:
+  add x.value, x.value, #1
+  ret
+.end
+
+.function lib.match.neon variant-of=lib.match.scalar version=neon-extend feature=neon (
+  inout: x.value
+)
+entry:
+  add x.value, x.value, #16
+  ret
+.end
+
+.function app.main export ()
+entry:
+  mov x10, #0
+  .call lib.match.scalar variant=neon-extend (
+    x.value=x10
+  )
+  .call lib.match.scalar feature=neon (
+    x.value=x10
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-equal? (length (regexp-match* #rx"bl \"?lib\\.match\\.neon\"?" rendered)) 2)
+     (check-false (regexp-match? #rx"bl \"?lib\\.match\\.scalar\"?" rendered)))
+
+   (test-case ".function export profile records public ABI metadata"
+     (define results
+       (parse-gnu #<<ASM
+.function asmp.deflate.raw-fixed export profile=apple-c-arm64 ()
+entry:
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (build-cfg (ok-items results)))
+     (define fn (cfg-get-function-by-name cfg 'asmp.deflate.raw-fixed))
+     (check-not-false fn)
+     (check-true (fn-get-info fn 'export #f))
+     (check-true (fn-get-info fn 'public-abi-root? #f))
+     (check-equal? (fn-get-info fn 'public-abi-profile #f) 'apple-c-arm64)
+     (check-false (fn-get-info fn 'profile #f)))
+
+   (test-case ".function profile requires export"
+     (define results
+       (parse-gnu #<<ASM
+.function internal.helper profile=c-aapcs64 ()
+entry:
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (check-exn #rx"profile=.*without export"
+                (lambda () (build-cfg (ok-items results)))))
 
    (test-case ".call supports fixed FPR and NEON vector slots"
      (define results
@@ -493,11 +826,11 @@ ASM
          (emit-function/result (run-pipeline main-fn default-pipeline-config))))
      (check-not-false (regexp-match? #rx"fmov d0, d2" rendered))
      (check-not-false (regexp-match? #rx"bl lib\\.scale" rendered))
-     (check-not-false (regexp-match? #rx"fmov d3, d1" rendered))
+     (check-not-false (regexp-match? #rx"fmov d3, d[0-9]+" rendered))
      (check-not-false (regexp-match? #rx"mov v0\\.16b, v10\\.16b" rendered))
      (check-not-false (regexp-match? #rx"mov v1\\.16b, v11\\.16b" rendered))
      (check-not-false (regexp-match? #rx"bl lib\\.vxor" rendered))
-     (check-not-false (regexp-match? #rx"mov v12\\.16b, v2\\.16b" rendered)))
+     (check-not-false (regexp-match? #rx"mov v12\\.16b, v[0-9]+\\.16b" rendered)))
 
    (test-case ".call counts GPR and FPR slots independently"
      (define results
@@ -541,8 +874,8 @@ ASM
      (check-not-false (regexp-match? #rx"fmov d0, d10" rendered))
      (check-not-false (regexp-match? #rx"mov x1, x11" rendered))
      (check-not-false (regexp-match? #rx"fmov d1, d11" rendered))
-     (check-not-false (regexp-match? #rx"mov x12, x2" rendered))
-     (check-not-false (regexp-match? #rx"fmov d12, d2" rendered)))
+     (check-not-false (regexp-match? #rx"mov x12, x[0-9]+" rendered))
+     (check-not-false (regexp-match? #rx"fmov d12, d[0-9]+" rendered)))
 
    (test-case ".call supports register-only SVE vector and predicate slots"
      (define results
@@ -588,8 +921,212 @@ ASM
      (check-not-false (regexp-match? #rx"orr z0\\.d, z10\\.d, z10\\.d" rendered))
      (check-not-false (regexp-match? #rx"mov p0\\.b, p5\\.b" rendered))
      (check-not-false (regexp-match? #rx"bl lib\\.sve" rendered))
-     (check-not-false (regexp-match? #rx"orr z11\\.d, z1\\.d, z1\\.d" rendered))
-     (check-not-false (regexp-match? #rx"mov p6\\.b, p1\\.b" rendered)))
+     (check-not-false (regexp-match? #rx"orr z11\\.d, z[0-9]+\\.d, z[0-9]+\\.d" rendered))
+     (check-not-false (regexp-match? #rx"mov p6\\.b, p[0-9]+\\.b" rendered)))
+
+   (test-case ".call to public C-like root reads outputs from return slots"
+     (define results
+       (parse-gnu #<<ASM
+.function api.add export profile=c-aapcs64 (
+  in: x.left,
+  in: x.right,
+  out: x.result
+)
+entry:
+  add x.result, x.left, x.right
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call api.add (
+    x.left=x10,
+    x.right=x11,
+    x.result=x12
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-not-false (regexp-match? #rx"mov x0, x10" rendered))
+     (check-not-false (regexp-match? #rx"mov x1, x11" rendered))
+     (check-not-false (regexp-match? #rx"bl api\\.add" rendered))
+     (check-not-false (regexp-match? #rx"mov x12, x0" rendered))
+     (check-false (regexp-match? #rx"mov x12, x2" rendered)))
+
+   (test-case ".call uses one temp for cyclic input slot moves"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.mix (
+  in: x.left,
+  in: x.right
+)
+entry:
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.mix (
+    x.left=x1,
+    x.right=x0
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define entry-block (fn-entry-block main-fn))
+     (define insns
+       (for/list ([ins (in-pvector (basic-block-instructions entry-block))]
+                  [i (in-range 3)])
+         ins))
+     (check-equal? (map ast-ins-mnemonic insns) '(mov mov mov))
+     (define temp (first (ast-ins-operands (first insns))))
+     (check-equal? (ast-reg-id temp) (string->symbol "__asmp_call_in$0"))
+     (check-equal? (ast-reg-id (second (ast-ins-operands (first insns)))) 1)
+     (check-equal? (ast-reg-id (first (ast-ins-operands (second insns)))) 1)
+     (check-equal? (ast-reg-id (second (ast-ins-operands (second insns)))) 0)
+     (check-equal? (ast-reg-id (first (ast-ins-operands (third insns)))) 0)
+     (check-equal? (ast-reg-id (second (ast-ins-operands (third insns))))
+                   (ast-reg-id temp)))
+
+   (test-case ".call uses one temp for cyclic output writeback"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.pair (
+  out: x.left,
+  out: x.right
+)
+entry:
+  mov x.left, #1
+  mov x.right, #2
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.pair (
+    x.left=x1,
+    x.right=x0
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (check-not-false main-fn)
+     (define insns '())
+     (fn-for-each-block
+      main-fn
+      (lambda (block)
+        (set! insns
+              (append insns
+                      (for/list ([ins (in-pvector (basic-block-instructions block))])
+                        ins)))))
+     (define bl-index
+       (for/first ([ins (in-list insns)]
+                   [i (in-naturals)]
+                   #:when (and (ast-ins? ins)
+                               (eq? (ast-ins-mnemonic ins) 'bl)))
+         i))
+     (check-not-false bl-index)
+     (define output-moves (take (drop insns (add1 bl-index)) 3))
+     (check-equal? (map ast-ins-mnemonic output-moves) '(mov mov mov))
+     (define temp (first (ast-ins-operands (first output-moves))))
+     (check-equal? (ast-reg-id temp) (string->symbol "__asmp_call_out$0"))
+     (check-equal? (ast-reg-id (second (ast-ins-operands (first output-moves)))) 0)
+     (check-equal? (ast-reg-id (first (ast-ins-operands (second output-moves)))) 0)
+     (check-equal? (ast-reg-id (second (ast-ins-operands (second output-moves)))) 1)
+     (check-equal? (ast-reg-id (first (ast-ins-operands (third output-moves)))) 1)
+     (check-equal? (ast-reg-id (second (ast-ins-operands (third output-moves))))
+                   (ast-reg-id temp)))
+
+   (test-case ".call input slot constraints prevent allocated hidden swaps"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.mix (
+  in: x.left,
+  in: x.right
+)
+entry:
+  ret
+.end
+
+.function app.main export ()
+entry:
+  mov x.a, x1
+  mov x.b, x0
+  .call lib.mix (
+    x.left=x.a,
+    x.right=x.b
+  )
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-false
+      (regexp-match? #rx"mov x0, x1\n    mov x1, x0\n    bl lib\\.mix"
+                     rendered))
+     (check-not-false
+      (regexp-match? #px"mov x[0-9]+, x1\n    mov x1, x0\n    mov x0, x[0-9]+"
+                     rendered)))
+
+   (test-case ".call output slot constraints prevent allocated hidden swaps"
+     (define results
+       (parse-gnu #<<ASM
+.function lib.pair (
+  out: x.left,
+  out: x.right
+)
+entry:
+  mov x.left, #1
+  mov x.right, #2
+  ret
+.end
+
+.function app.main export ()
+entry:
+  .call lib.pair (
+    x.left=x.a,
+    x.right=x.b
+  )
+  mov x1, x.a
+  mov x0, x.b
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define main-fn (cfg-get-function-by-name cfg 'app.main))
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline main-fn default-pipeline-config))))
+     (check-false
+      (regexp-match? #rx"bl lib\\.pair\n    mov x1, x0\n    mov x0, x1"
+                     rendered))
+     (check-not-false
+      (regexp-match? #px"mov x[0-9]+, x1\n    mov x1, x0\n    mov x0, x[0-9]+"
+                     rendered)))
 
    (test-case ".call SVE MVP rejects predicate slot overflow with source locations"
      (define results

@@ -6,3 +6,5 @@ compiled/
 
 *.txt
 *.datum
+
+research/deflate-optimization/runs/

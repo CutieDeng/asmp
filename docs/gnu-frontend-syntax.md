@@ -74,7 +74,54 @@ entry:
 .end
 ```
 
-函数自身不需要为了使用虚拟寄存器而声明 ABI；未声明时会使用内建 AArch64 分配策略。只有当你确实要约束某个函数“对外承诺保护哪些寄存器”时，才需要写 `abi=<name>`。
+`export` 函数默认记录 public ABI profile `c-aapcs64`；如果边界不是默认 C/AAPCS64 形态，可以显式写：
+
+```asm
+.function crypto.deflate.raw-fixed export profile=apple-c-arm64 ()
+entry:
+  ret
+.end
+```
+
+当前 MVP 会把 `profile=<name>` 归一化成 CFG metadata `public-abi-profile`，并把该函数标记为 public ABI root。已知 profile 包括 `c-aapcs64`、`apple-c-arm64`、`linux-syscall`、`kernel-aarch64`、`jit-private`、`project-abi`。`profile=...` 必须和 `export` 一起使用。CFG stage 已经会检查显式 C-like public profile 上明显错误的 private ABI，例如 `export profile=c-aapcs64 abi=fast20`。`c-aapcs64` / `apple-c-arm64` 的托管签名 lowering 会把 `in` / `inout` 映射到参数寄存器，把单路 `out` / `inout` 映射到返回寄存器。函数入口输入现在用 direct live-in move 加内部干涉约束表示，避免全量入口 snapshot；这些约束只给 regalloc 消费，不输出到最终汇编。非 C-like profile 的完整 checker 和 profile-specific lowering 仍是后续工作。
+
+`export` 表示函数必须作为独立符号输出，并默认写 `.globl`。库边界还可以单独控制链接可见性和头文件暴露：
+
+```asm
+.function deflate_fixed_chain_aarch64_asm export profile=c-aapcs64 visibility=hidden no-header ()
+entry:
+  ret
+.end
+```
+
+`visibility=hidden` 在 GNU 输出中生成 `.hidden symbol`，在 Apple 输出中生成 `.private_extern _symbol`；`visibility=local` 保留函数体但不写 `.globl`。`header` / `no-header` 只影响 `--public-c-header`，不影响函数是否输出或能否被同一构建图里的 `.call` / `bl` 引用。为兼容旧代码，未显式写 `header` / `no-header` 的 C-like public root 仍会参与 header 生成；内部 raw 内核应显式写 `no-header`。
+
+`c-aapcs64`、`apple-c-arm64`、`linux-syscall`、`kernel-aarch64` 目前只允许 ordinary entry ABI：未写 `abi`、`abi=aapcs64`、`abi=arm64`、`abi=leaf`、`abi=naked`。`jit-private` 和 `project-abi` 则必须显式写 `abi=<name>`，因为外部调用者要知道它承诺的是哪套项目私有约定：
+
+```asm
+.function engine.plugin.entry export profile=project-abi abi=engine-fast ()
+entry:
+  ret
+.end
+```
+
+函数自身不需要为了使用虚拟寄存器而声明 ABI；未声明时会使用内建 AArch64 分配策略。内部优化 ABI 仍优先使用 `.call abi=<name>` 或 IPA call-convention clone 机制表达，不应该混同 public profile。
+
+构建时可以额外导出 public ABI manifest：
+
+```bash
+racket cli/as.rkt --gnu-input --public-abi-manifest public-abi.rktd input.asm
+```
+
+manifest 是可读写的 Racket datum，记录所有 exported public root 的 concrete symbol、logical name、profile、显式 `abi` 和源码位置。后续 header/manifest 生成、dispatcher、debug/profile 归并都应优先消费这个边界清单，而不是扫描最终汇编文本。
+
+对于简单 C-like public root，也可以直接生成 C header：
+
+```bash
+racket cli/as.rkt --gnu-input --public-c-header asmp_public.h input.asm
+```
+
+当前 header MVP 只为 `c-aapcs64` / `apple-c-arm64`、未写 `no-header`、且带非空托管 `.function` 签名的导出函数生成原型。`in` 参数成为 C value 参数，单个 `out` 或 `inout` 成为返回值；多输出、SVE/predicate、无托管签名的低层入口会被跳过并写入注释。显式 `no-header` 的入口会被完全省略，不在头文件注释里暴露内部符号名。符号名如果不是合法 C identifier，会生成 sanitised C 名并使用 `__asm__("real.symbol")` 绑定真实汇编符号。
 
 外部调用可以单独声明 call ABI：
 
@@ -148,7 +195,7 @@ entry:
 .end
 ```
 
-`.call` 会按固定托管调用约定降低为入参 move、`bl target`、出参 move。GPR、vector/FPR/SVE 和 predicate 参数分别按 ABI 的 `args` slot 计数：`x` / `w` 使用 GPR slot，`s` / `d` 使用 `fmov`，`v` / `q` 使用 128-bit 向量 `mov vN.16b, vM.16b`，`z` 使用 `orr zN.d, zM.d, zM.d` 做 bit-copy，`p` 使用 `mov pN.b, pM.b`。固定 FPR/NEON 和 SVE `z` 共享同一组 vector slot，predicate `p` 使用独立 slot。`in` / `inout` 在调用前传入，`out` / `inout` 在返回后传回同一个托管 slot。找不到 `.function` 定义、少传、多传、重复绑定或 slot 数量超过 ABI 配置都会报错。当前 MVP 不做 stack fallback；寄存器组和 lane/index 形参仍是下一阶段能力。直接调用 C/libc/未知外部符号仍使用原始 `bl symbol` 和物理 ABI 寄存器。
+`.call` 会按固定托管调用约定降低为入参 move、`bl target`、出参 move。GPR、vector/FPR/SVE 和 predicate 参数分别按 ABI 的 `args` slot 计数：`x` / `w` 使用 GPR slot，`s` / `d` 使用 `fmov`，`v` / `q` 使用 128-bit 向量 `mov vN.16b, vM.16b`，`z` 使用 `orr zN.d, zM.d, zM.d` 做 bit-copy，`p` 使用 `mov pN.b, pM.b`。固定 FPR/NEON 和 SVE `z` 共享同一组 vector slot，predicate `p` 使用独立 slot。普通内部函数里，`out` / `inout` 在返回后传回同一个托管 slot；C-like public root 里，输出走 ABI `return` slot。入参和出参搬运按 parallel-copy 语义降低：无冲突时直接搬运，交叉覆盖或环才插入内部临时；同时 lowering 会给同一个 call bundle 的其它 ABI slot 加内部干涉约束，避免虚拟寄存器分配后重新形成隐藏 swap。找不到 `.function` 定义、少传、多传、重复绑定或 slot 数量超过 ABI 配置都会报错。当前 MVP 不做 stack fallback；寄存器组和 lane/index 形参仍是下一阶段能力。直接调用 C/libc/未知外部符号仍使用原始 `bl symbol` 和物理 ABI 寄存器。
 
 命令行可以传入多个输入文件，asmp 会先合并构建图再解析 `.call` 目标：
 
@@ -166,9 +213,69 @@ racket cli/as.rkt --gnu-input -o out.s caller.asm callee.asm
 
 函数名是可链接符号；普通 `entry:` / `loop:` / `done:` label 仍然只在当前函数内可见，后端会输出成函数作用域局部标签。不同函数可以重复使用 `entry:`，同一个函数内仍不应该重复定义同名 label。带 `-` 的函数符号会在输出汇编中按需 quote，以兼容 GNU/Apple assembler。
 
-IR 中会同时保留 logical function identity 和 concrete version identity。源代码里的 `.function crypto.deflate.main` 会得到 canonical version；后续内部 calling convention 或 caller-specialization clone 会使用新的 private linkage symbol，例如 `crypto.deflate.main$asmp.cc1`，但 metadata 仍指向 logical function `crypto.deflate.main`，并记录 version id、clone reason、specialization key 和 debug origin。诊断、debug 和 profile 归并应默认回到 logical function，必要时再显示具体 clone version。
+IR 中会同时保留 logical function identity 和 concrete version identity。源代码里的 `.function crypto.deflate.main` 会得到 canonical version；后续内部 calling convention 或 caller-specialization clone 会使用新的 private linkage symbol，例如 `crypto.deflate.main$asmp.cc1`，但 metadata 仍指向 logical function `crypto.deflate.main`，并记录 version id、clone reason、specialization key 和 debug origin。clone 默认清除 `export` / `public-abi-profile` 等 public boundary metadata，因此不会把内部优化版本误暴露成外部接口。诊断、debug 和 profile 归并应默认回到 logical function，必要时再显示具体 clone version。
 
-当前已经有 CFG 级 clone MVP：`semantic/function-clone.rkt` 可以为一个 `.function` 插入新的 versioned linkage symbol，并把指定 caller 里的直接 `bl target` 或尚未 lower 的 `.call target (...)` 改指向 clone。clone group 记录在 CFG metadata 中，函数自身的 `function-version` 是权威身份来源。这个能力目前是 IPA/ABI 自动选择前的机制层，不会自动决定哪个 caller 应该走哪个 calling convention，也还没有接入默认 pipeline；策略选择、cost model、clone 数量限制和 debug/profile 归并仍是后续工作。
+手写优化实现也可以挂到同一个 logical function family 下，而不是伪装成优化器自动生成的代码。例如 NEON/SVE 版本可以写成独立函数体，并用 `variant-of` 指向标量逻辑函数：
+
+```asm
+.function asmp.deflate.fixed.neon-extend variant-of=asmp.deflate.fixed version=neon-extend feature=neon (
+  in:  x.dst, x.src,
+  out: w.status
+)
+entry:
+  ret
+.end
+```
+
+这里 emitted linkage symbol 仍然是 `asmp.deflate.fixed.neon-extend`，但 IR 里的 logical name 是 `asmp.deflate.fixed`，version id 是 `neon-extend`，version kind 是 `source-variant`，clone reason 是 `handwritten`。因此后续 dispatcher、IPA 选择、debug/profile 聚合可以把它和标量实现视为同一族。`feature=neon` 只是当前的元数据，不会让编译器自动生成 NEON 指令；NEON 函数体仍由用户手写。
+
+当前已经有 CFG 级 clone MVP：`semantic/function-clone.rkt` 可以为一个 `.function` 插入新的 versioned linkage symbol，并把指定 caller 里的直接 `bl target` 或尚未 lower 的 `.call target (...)` 改指向 clone。clone group 记录在 CFG metadata 中，函数自身的 `function-version` 是权威身份来源。clone 即使来自 `export` public root，也会保持 private：canonical public entry 继续保留 `export` / `public-abi-profile`，clone 会清除 public boundary metadata，并额外记录 `public-abi-origin-profile`、`public-abi-origin-header?` 和 `public-abi-origin-visibility` 以便后续 debug/profile/dispatch 归并。这个能力目前是 IPA/ABI 自动选择前的机制层；完整策略选择、clone 数量限制和 debug/profile 归并仍是后续工作。
+
+在此基础上，`semantic/ipa-callconv.rkt` 提供了 IPA call-convention clone selector。策略层可以显式给出 `(caller, callee, abi)` selection；也可以调用 `plan-callconv-selections`，让 planner 在候选 ABI 中按 managed `.call` 的 caller-side move 数估算收益，自动产出 selection。selector 会验证目标确实对应一个尚未 lower 的 managed `.call` 边，clone callee，给 clone 写入新的 `abi` metadata，并只重写被选中的 caller。这个 pass 必须运行在 `build-cfg` 之后、`expand-inline-cfg` 之前，因为 `.call` lowering 会读取目标函数的 `abi` 来决定参数 slot。自动 planner 会把 header-visible public root 当作 ABI barrier，不自动为它选择内部 calling convention；显式 `.call abi=...` hint 仍然可以为某个调用点实例化 clone。`visibility=hidden no-header` 的 exported raw/internal root 不算 header-visible barrier，因此可以被自动 planner 当作内部实现候选。当前 planner 不处理原始 `bl` 的 ABI 语义，不看寄存器压力、spill、profile 或递归/SCC 上的 clone 策略；这些留给后续 policy 层。
+
+CLI 中可以显式给出候选 ABI 来启用 planner：
+
+```bash
+racket cli/as.rkt --gnu-input --ipa-callconv-candidates fast20,fast21 input.asm
+```
+
+`--ipa-callconv-min-savings N` 可以调整最小 move 节省阈值；`--ipa-callconv-report` 会输出 planner 选中的 caller/callee/ABI 和 move-cost 对比。
+
+用户也可以直接在 `.call` 上引导某个调用边使用指定 ABI 实例化 callee：
+
+```asm
+.call math.inc abi=fast20 (
+  x.value=x20
+)
+```
+
+这个 hint 会生成一个使用 `fast20` 的 `math.inc` clone，并只把这一条 managed `.call` 改到 clone。同一个 caller 可以多次 `.call` 同一个 callee，并在不同调用点写不同的 `abi=` hint；源码 hint 的粒度是调用点。自动 planner 目前仍按 caller/callee 边估算和选择，如果某条边上出现源码 hint，CLI 会让源码 hint 优先，不再用自动 planner 覆盖这条边。
+
+调用侧也可以按 source variant 选择手写优化实现，而不用直接写具体实现符号：
+
+```asm
+.function asmp.deflate.fixed.neon-extend variant-of=asmp.deflate.fixed version=neon-extend feature=neon (
+  inout: x.state
+)
+entry:
+  ret
+.end
+
+.function app.worker ()
+entry:
+  .call asmp.deflate.fixed variant=neon-extend (
+    x.state=x20
+  )
+  .call asmp.deflate.fixed feature=neon (
+    x.state=x20
+  )
+  ret
+.end
+```
+
+`variant=` / `version=` 匹配被调用函数的 source-variant version id，`feature=` 匹配 `feature=<name>` metadata。匹配到唯一 variant 时，`.call` 会被降低到该具体实现符号；没有匹配或匹配到多个候选都会报错。这个选择机制不生成 NEON/SVE 代码，它只在手写 variant 已存在时选择它。
+
+较大的 GNU `.asm` 阅读例子可以看 `example/013-deflate-fixed-fast.asm` 和 `example/019-deflate-fixed-chain.asm`：前者展示 fixed-Huffman bit writer 和 `.inline` helper 组织方式，后者在同一框架里加入有界 hash-chain match finder。
 
 建议按下面的顺序阅读示例，逐步建立托管调用模型：
 
@@ -178,6 +285,7 @@ IR 中会同时保留 logical function identity 和 concrete version identity。
 | `example/015-managed-call-hello.asm` | 托管调用如何包住一个真实 C ABI `puts` 调用 |
 | `example/016-managed-call-fpr-neon.asm` | `d` 标量和 `v` 向量参数如何占用 vector/FPR slot |
 | `example/017-managed-call-sve-registers.asm` | SVE `z` 和 predicate `p` 的寄存器传参 MVP |
+| `example/018-managed-call-abi-hint.asm` | 同一个 caller 里按调用点选择不同 ABI clone |
 
 这几份示例也刻意暴露当前边界：`.call` 只查找同一次构建图里的 `.function`，所有绑定必须具名，FPR/NEON/SVE/predicate 目前只做寄存器 slot 传递，没有 stack fallback，也还不支持寄存器组、lane/index 形参。
 

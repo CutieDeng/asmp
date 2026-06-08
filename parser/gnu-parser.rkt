@@ -493,6 +493,34 @@
   (for/list ([part (in-list parts)])
     (parse-named-binding "call" part source line)))
 
+(define (split-call-options arg-text source line)
+  (let loop ([text (string-trim arg-text)] [attrs (hash)])
+    (cond
+      [(regexp-match #rx"^(abi|variant|version|feature)=([^ \t()]+)[ \t]*(.*)$" text)
+       => (lambda (m)
+            (define key (string->symbol (cadr m)))
+            (define value (caddr m))
+            (define attr-key
+              (case key
+                [(abi) 'abi]
+                [(variant version) 'variant-id]
+                [(feature) 'target-feature]))
+            (define what
+              (case key
+                [(abi) "call ABI"]
+                [(variant version) "call variant"]
+                [(feature) "call target feature"]))
+            (define parsed
+              (parse-managed-symbol-token value what))
+            (loop (string-trim (cadddr m))
+                  (hash-set attrs attr-key parsed)))]
+      [else (values attrs text)])))
+
+(define (call-directive-args bindings attrs)
+  (if (zero? (hash-count attrs))
+      bindings
+      (hash-set attrs 'bindings bindings)))
+
 (define (parse-paren-list text what)
   (define trimmed (string-trim text))
   (unless (and (string-prefix? trimmed "(")
@@ -515,14 +543,16 @@
     (error 'gnu-parser ".call needs a target"))
   (define target (parse-managed-symbol-token (cadr m) "call target"))
   (define arg-text (string-trim (or (caddr m) "")))
-  (define parts (parse-paren-list arg-text ".call arguments"))
-  (values target (parse-call-bindings parts source line)))
+  (define-values (attrs paren-text) (split-call-options arg-text source line))
+  (define parts (parse-paren-list paren-text ".call arguments"))
+  (values target (call-directive-args (parse-call-bindings parts source line) attrs)))
 
 (define (make-call-item target arg-text source line)
-  (define parts (parse-paren-list arg-text ".call arguments"))
+  (define-values (attrs paren-text) (split-call-options arg-text source line))
+  (define parts (parse-paren-list paren-text ".call arguments"))
   (ast-directive 'call
                  target
-                 (parse-call-bindings parts source line)
+                 (call-directive-args (parse-call-bindings parts source line) attrs)
                  (loc source line)))
 
 (define (parse-call-start rest source line st)
@@ -613,9 +643,41 @@
   (for/fold ([attrs (hash)])
             ([part (in-list (filter (lambda (s) (not (string=? s "")))
                                     (regexp-split #rx"[ \t]+" (string-trim text))))])
-    (case (string->symbol (string-downcase part))
-      [(export) (hash-set attrs 'export #t)]
-      [else (error 'gnu-parser "invalid .function attribute: ~a" part)])))
+    (cond
+      [(regexp-match #rx"^([^=]+)=(.+)$" part)
+       => (lambda (m)
+            (define key (string->symbol (string-downcase (string-trim (cadr m)))))
+            (define value (string-trim (caddr m)))
+            (case key
+              [(profile)
+               (hash-set attrs 'profile
+                         (parse-managed-symbol-token value ".function profile"))]
+              [(abi)
+               (hash-set attrs 'abi
+                         (parse-managed-symbol-token value ".function ABI"))]
+              [(variant-of logical logical-name)
+               (hash-set attrs 'variant-of
+                         (parse-managed-symbol-token value ".function variant-of"))]
+              [(version version-id)
+               (hash-set attrs 'version-id
+                         (parse-managed-symbol-token value ".function version"))]
+              [(feature target target-feature)
+               (hash-set attrs 'target-feature
+                         (parse-managed-symbol-token value ".function target feature"))]
+              [(visibility)
+               (hash-set attrs 'visibility
+                         (string->symbol (string-downcase value)))]
+              [(header)
+               (hash-set attrs 'header
+                         (string->symbol (string-downcase value)))]
+              [else
+               (error 'gnu-parser "invalid .function attribute: ~a" part)]))]
+      [else
+       (case (string->symbol (string-downcase part))
+         [(export) (hash-set attrs 'export #t)]
+         [(header) (hash-set attrs 'header #t)]
+         [(no-header noheader) (hash-set attrs 'no-header #t)]
+         [else (error 'gnu-parser "invalid .function attribute: ~a" part)])])))
 
 (define (split-function-attrs/signature text)
   (define trimmed (string-trim text))

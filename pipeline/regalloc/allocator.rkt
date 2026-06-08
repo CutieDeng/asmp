@@ -321,32 +321,53 @@
          (reg-id-physical? phys-reg)
          (not (is-callee-saved-physical? phys-reg abi))))
 
+  (define (precolored-reg? reg)
+    (define idx (ordered-map-ref reg-index reg #f))
+    (and idx (bitset-member? (allocator-state-precolored state) idx)))
+
+  (define (uncolored-physical? reg)
+    (and (reg-id-physical? reg)
+         (not (abi-reg->color abi (reg-id-class reg) (reg-id-id reg)))))
+
+  (define (precolored-neighbor-ok? neighbor precolored-reg)
+    (define alias (get-alias state neighbor))
+    (define degree (ordered-map-ref (allocator-state-degree state) neighbor 0))
+    (and (not (equal? alias precolored-reg))
+         (or (ig-interferes? ig alias precolored-reg)
+             (precolored-reg? alias)
+             (< degree k))))
+
   (cond
     ;; 如果合并会导致 live-across-call 的虚拟寄存器被分配到 caller-saved，禁止
     [(and ui (bitset-member? (allocator-state-precolored state) ui))
      (cond
+       ;; Reserved physical registers (for example x16/x17 rewrite temps) do
+       ;; not have allocator colors, so a virtual value must not coalesce into
+       ;; them and become live across later rewrite-time scratch use.
+       [(and vi
+             (not (bitset-member? (allocator-state-precolored state) vi))
+             (uncolored-physical? u))
+        #f]
        ;; u 是预着色（物理），v 是虚拟
        [(and vi (not (bitset-member? (allocator-state-precolored state) vi))
              (violates-live-across-call? u v vi))
         #f]
        [else
         (for/and ([t (in-list (ig-neighbors ig v))])
-          (define ti (ordered-map-ref reg-index t #f))
-          (or (ig-interferes? ig t u)
-              (and ti (bitset-member? (allocator-state-precolored state) ti))
-              (< (ordered-map-ref (allocator-state-degree state) t 0) k)))])]
+          (precolored-neighbor-ok? t u))])]
     ;; v 是预着色（物理），u 是虚拟
     [(and vi (bitset-member? (allocator-state-precolored state) vi))
      (cond
+       [(and ui
+             (not (bitset-member? (allocator-state-precolored state) ui))
+             (uncolored-physical? v))
+        #f]
        [(and ui (not (bitset-member? (allocator-state-precolored state) ui))
              (violates-live-across-call? v u ui))
         #f]
        [else
         (for/and ([t (in-list (ig-neighbors ig u))])
-          (define ti (ordered-map-ref reg-index t #f))
-          (or (ig-interferes? ig t v)
-              (and ti (bitset-member? (allocator-state-precolored state) ti))
-              (< (ordered-map-ref (allocator-state-degree state) t 0) k)))])]
+          (precolored-neighbor-ok? t v))])]
     [else
      (define combined (remove-duplicates (append (ig-neighbors ig u) (ig-neighbors ig v))))
      (define high-deg (for/sum ([n (in-list combined)])
