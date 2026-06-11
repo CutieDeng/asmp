@@ -215,7 +215,7 @@
     (check-equal? (multi-class-ig-effective-abi mig)
                   (abi-scratch-only arm64-abi)))
 
-  (test-case "有 save! 时 effective-abi 应保持声明 ABI"
+  (test-case "有 save! 时 effective-abi 保留声明 ABI 但 LR 不是 preserved"
     (define cfg
       (source->cfg "
 (: function with_save)
@@ -229,7 +229,11 @@
     (define fn (cfg-get-function cfg 0))
     (define lv (analyze-liveness fn))
     (define mig (build-interference-graphs fn lv #:abi arm64-abi))
-    (check-equal? (multi-class-ig-effective-abi mig) arm64-abi)))
+    (define effective (multi-class-ig-effective-abi mig))
+    (check-true (reg-allocatable? (abi-config-gpr effective) 30))
+    (check-false (reg-preserved? (abi-config-gpr effective) 30))
+    (check-equal? (abi-config-fpr effective) (abi-config-fpr arm64-abi))
+    (check-equal? (abi-config-pred effective) (abi-config-pred arm64-abi))))
 
 ;; ============================================================
 ;; 缓存机制测试

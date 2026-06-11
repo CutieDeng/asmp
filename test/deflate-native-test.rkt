@@ -422,9 +422,10 @@ int main(void) {
       "asmp deflate hash chain test. asmp deflate hash chain test. "
       "fixed huffman, raw stream, bounded match finder.\n";
 
+  static const uint8_t repeated_pattern[] = "abcabcabcXYZXYZXYZ0123456789";
   static uint8_t repeated[4096];
   for (size_t i = 0; i < sizeof(repeated); i++) {
-    repeated[i] = (uint8_t)("abcabcabcXYZXYZXYZ0123456789"[i % 30]);
+    repeated[i] = repeated_pattern[i % (sizeof(repeated_pattern) - 1)];
   }
 
   static uint8_t period257[65536];
@@ -468,7 +469,7 @@ int main(void) {
   failed |= auto_roundtrip("empty", empty, 0, 2);
   failed |= auto_roundtrip("small", small, sizeof(small) - 1, 10);
   failed |= auto_roundtrip("text", text, sizeof(text) - 1, 83);
-  failed |= auto_roundtrip("repeated", repeated, sizeof(repeated), 55);
+  failed |= auto_roundtrip("repeated", repeated, sizeof(repeated), 53);
   failed |= auto_roundtrip("period257", period257, sizeof(period257), 908);
   failed |= auto_roundtrip("binary", binary, sizeof(binary), 1196);
   failed |= auto_roundtrip("long-repeat", long_repeat, sizeof(long_repeat), 571);

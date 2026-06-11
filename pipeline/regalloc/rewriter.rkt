@@ -106,6 +106,16 @@
           (+ (spill-slot-offset last-slot) (spill-slot-size last-slot)))))
   (* (quotient (+ spill-size extra 15) 16) 16))
 
+(define (sp-reg)
+  (ast-reg 'x 'sp #f #f #f #f no-srcloc))
+
+(define (make-sp-adjust-instruction mnemonic amount [loc no-srcloc])
+  (ast-ins mnemonic #f
+           (list (sp-reg)
+                 (sp-reg)
+                 (ast-imm amount no-srcloc))
+           loc))
+
 ;; ============================================================
 ;; 指令重写
 ;; ============================================================
@@ -115,6 +125,7 @@
   (define spilled (alloc-result-spilled alloc-result))
   (define coalesced (alloc-result-coalesced alloc-result))
   (define spill-slots (compute-spill-slots spilled))
+  (define spill-stack-size (compute-frame-size spill-slots))
 
   ;; 检测是否建立了 frame pointer
   (define use-fp? (detect-frame-pointer fn))
@@ -179,11 +190,19 @@
   (define new-blocks
     (for/fold ([blocks (asm-function-blocks fn)])
               ([kv (in-ordered-map (asm-function-blocks fn))])
-      (define bb-id-val (car kv))
+      (define bb-key (car kv))
       (define block (cdr kv))
+      (define entry-block (fn-entry-block fn))
+      (define insert-fp-spill-prologue?
+        (and (eq? spill-strategy 'fp-stack)
+             (> spill-stack-size 0)
+             entry-block
+             (equal? bb-key (bb-id-val (basic-block-id entry-block)))))
       (define new-block (rewrite-block block assignment coalesced spill-map abi
-                                        spill-strategy neon-spill-map sp-adjustment))
-      (ordered-map-set blocks bb-id-val new-block)))
+                                        spill-strategy neon-spill-map sp-adjustment
+                                        #:insert-fp-spill-prologue? insert-fp-spill-prologue?
+                                        #:fp-spill-stack-size spill-stack-size))
+      (ordered-map-set blocks bb-key new-block)))
 
   (struct-copy asm-function fn [blocks new-blocks]))
 
@@ -283,16 +302,59 @@
     (set! neon-idx (add1 neon-idx))
     (ordered-map-set m reg neon-reg)))
 
+(define (frame-pointer-setup-ins? ins)
+  (and (ast-ins? ins)
+       (eq? (ast-ins-mnemonic ins) 'mov)
+       (let ([ops (ast-ins-operands ins)])
+         (and (= (length ops) 2)
+              (ast-reg? (car ops))
+              (ast-reg? (cadr ops))
+              (or (and (eq? (ast-reg-kind (car ops)) 'x)
+                       (equal? (ast-reg-id (car ops)) 29))
+                  (equal? (ast-reg-id (car ops)) 'fp))
+              (equal? (ast-reg-id (cadr ops)) 'sp)))))
+
+(define (load-directive? ins)
+  (and (ast-directive? ins)
+       (eq? (ast-directive-kind ins) 'load!)))
+
 (define (rewrite-block block assignment coalesced spill-map abi
-                        spill-strategy neon-spill-map sp-adjustment)
+                        spill-strategy neon-spill-map sp-adjustment
+                        #:insert-fp-spill-prologue? [insert-fp-spill-prologue? #f]
+                        #:fp-spill-stack-size [fp-spill-stack-size 0])
   (define instructions (basic-block-instructions block))
-  (define rewritten-instructions
-    (for/fold ([result (pvector-empty)])
+  (define-values (rewritten-instructions _)
+    (for/fold ([result (pvector-empty)]
+               [inserted-prologue? #f])
               ([ins (in-pvector instructions)])
-      (if (ast-ins? ins)
-          (rewrite-instruction ins result assignment coalesced spill-map abi
-                               spill-strategy neon-spill-map sp-adjustment)
-          (pvector-cons-right result ins))))
+      (cond
+        [(ast-ins? ins)
+         (define result*
+           (rewrite-instruction ins result assignment coalesced spill-map abi
+                                spill-strategy neon-spill-map sp-adjustment))
+         (if (and insert-fp-spill-prologue?
+                  (not inserted-prologue?)
+                  (> fp-spill-stack-size 0)
+                  (frame-pointer-setup-ins? ins))
+             (values (pvector-cons-right
+                      result*
+                      (make-sp-adjust-instruction 'sub fp-spill-stack-size
+                                                  (ast-srcloc ins)))
+                     #t)
+             (values result* inserted-prologue?))]
+        [(and (load-directive? ins)
+              (eq? spill-strategy 'fp-stack)
+              (> fp-spill-stack-size 0))
+         (values (pvector-cons-right
+                  (pvector-cons-right
+                   result
+                   (make-sp-adjust-instruction 'add fp-spill-stack-size
+                                               (ast-srcloc ins)))
+                  ins)
+                 inserted-prologue?)]
+        [else
+         (values (pvector-cons-right result ins)
+                 inserted-prologue?)])))
   (struct-copy basic-block block [instructions rewritten-instructions]))
 
 (define (rewrite-instruction ins result assignment coalesced spill-map abi

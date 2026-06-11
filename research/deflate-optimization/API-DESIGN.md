@@ -334,12 +334,45 @@ asmp_deflate_raw_fixed
   -> private selected implementation
 ```
 
+The current 024 NEON experiment uses this shape as a link-time MVP: it keeps
+the versioned entrypoints such as `asmp_deflate_raw_fixed_neon_extend`, and
+also emits weak `asmp_deflate_raw_*` defaults that forward to the selected NEON
+implementation. A standalone 024 build can therefore be consumed through the
+stable C API, while a benchmark or final library can provide strong
+`asmp_deflate_raw_*` symbols to override those weak defaults.
+
+`example/025-deflate-default-neon-dispatch.asm` is the first strong selector
+object. It exports the stable `asmp_deflate_raw_*` names and tail-branches to
+the 024 versioned NEON wrappers. That keeps build-time selection explicit and
+linkable without cloning or copying the compressor source.
+
+`example/026-deflate-default-word-dispatch.asm` is the companion non-NEON
+selector. Linking 023 plus 026 exposes the same stable C API but chooses the
+word-extend implementation. In other words, build-time selection is currently
+plain object selection: choose exactly one strong selector object for the final
+library image.
+
+`example/027-deflate-runtime-dispatch.asm` is the first runtime selector MVP.
+It links both 023 and 024 and exports the same stable C API. Stable entries
+load a cached target pointer and `br` to it; the hidden no-header setter writes
+`asmp_deflate_runtime_features`, chooses a target table, and copies its six
+function pointers into the selected slots. Bit 0 clear selects the word-extend
+wrappers; bit 0 set selects the NEON-extend wrappers. The slots default to NEON
+because NEON is baseline AArch64. A hidden no-header
+`asmp_deflate_runtime_init` entrypoint calls the hidden
+`asmp_deflate_runtime_detect_features` hook and passes the returned feature word
+to the setter. The detector is a weak hidden default that currently returns the
+baseline NEON feature bit; a platform object can provide a strong replacement
+without changing the public API. This object does not yet call `sysctl`,
+`getauxval`, or IFUNC/HWCAP by itself.
+
 On ELF, IFUNC-style dispatch could be supported later. For portable behavior
 across Mach-O and ELF, a normal wrapper dispatcher is simpler:
 
 - choose at build time for the MVP;
-- later choose at first call based on CPU features and cache a function
-  pointer;
+- choose at runtime by updating explicit cached target slots from a feature word;
+- initialize that feature word through a hidden runtime init entrypoint;
+- later teach that init entrypoint to consume CPU probes or platform resolvers;
 - keep all private symbols hidden/non-exported;
 - use `no-header` for exported raw/internal entries that are useful to link but
   must not leak into installed C headers.
@@ -377,6 +410,51 @@ The current codebase already has many required pieces:
   (`asmp_deflate_raw_fixed`) with `dst_cap`, `dst_len`, scratch, and status
   handling; the native zlib harness includes the generated header and calls
   this wrapper;
+- `example/045-deflate-dynamic-lz77-huffman.asm` exports an experimental
+  C-profile dynamic-Huffman LZ77 wrapper and is included in the native
+  benchmark as a non-default codec;
+- `example/046-deflate-auto-dynamic-probe.asm` exports a versioned selector
+  probe that combines the stable fixed/stored auto path with the 045 dynamic
+  path without replacing the installed `asmp_deflate_raw_auto` symbol;
+- `example/047-deflate-auto-cost-probe.asm` exports a versioned selector
+  probe that first runs 043 LZ77 frequency counting, then selects 045 only when
+  the distance frequencies show enough match tokens;
+- `example/048-deflate-auto-size-probe.asm` exports a versioned selector
+  probe that builds the same dynamic metadata used by 045 and chooses dynamic
+  only when modeled dynamic bytes are strictly smaller than modeled
+  fixed/stored auto bytes;
+- `example/049-deflate-auto-prepared-size-probe.asm` exports a versioned
+  selector probe that preserves 048's size decision but reuses the prepared
+  dynamic metadata for emission when dynamic wins, avoiding a second 043 pass
+  and a second round of LL/DIST/BL Huffman tree building;
+- `example/050-deflate-auto-cheap-prepared-size-probe.asm` exports a versioned
+  selector probe that adds a large-input 043 match-token gate before 049's full
+  size preparation, preserving small size-model wins while avoiding full
+  Huffman preparation on low-match fallback input;
+- `example/051-deflate-blocked-fixed.asm` exports a versioned split-block
+  fixed-Huffman stream probe. It keeps bit-buffer state live across 32 KiB
+  compressed blocks and exists to prove block framing before the dynamic
+  selector is moved to block-level decisions;
+- `example/052-deflate-blocked-auto.asm` exports a versioned split-block
+  fixed/stored selector probe. It rewinds a speculative fixed block to the
+  saved entry bit state and emits stored when the stored block is smaller;
+- `example/053-deflate-blocked-dynamic-auto.asm` exports a versioned
+  split-block fixed/stored/dynamic selector probe. It prepares dynamic metadata
+  per 32 KiB block, emits from the prepared tables when dynamic wins, and
+  otherwise falls back to the 052 fixed/stored block path;
+- `research/deflate-optimization/asmp-deflate-library.rktd` is the current
+  single library manifest for source membership and stable-vs-experimental
+  exports;
+- `research/deflate-optimization/library-manifest.rkt` scans those sources,
+  merges their public ABI entries, filters them through the manifest export
+  groups, and renders the curated `asmp_deflate.h`;
+- `research/deflate-optimization/render-library-header.rkt` refreshes the
+  checked-in header snapshot from the manifest without building objects, and
+  `--check` verifies that the snapshot is current;
+- `research/deflate-optimization/build-native-library.rkt` consumes the same
+  manifest, builds a macOS arm64 static library, and installs the generated
+  `asmp_deflate.h` containing the stable raw API plus experimental
+  045/046/047/048/049/050/051/052/053 entries;
 - `.call abi=...` can guide one callsite;
 - regalloc has ABI effects and save/restore support.
 
@@ -394,14 +472,22 @@ The gaps to close for a polished library mode are:
    not only managed-call move cost.
 7. Extend managed public signatures beyond simple scalar C-like arguments and
    single scalar returns.
+8. Tune and harden the 053 deflate-level policy wrapper so stored, fixed, and
+   dynamic block choices can eventually be promoted without exposing private
+   implementation symbols.
 
 ## MVP Plan
 
-1. Keep `019` as the raw internal baseline.
-2. Keep `asmp_deflate_raw_fixed` in `019` as the managed-signature public C
-   wrapper.
-3. Add `020` for parser quality work or the next deflate optimization.
-4. Keep the native harness calling only the public wrapper.
-5. Keep implementation versions registered in `VERSIONS.md`.
-6. Turn the generated `asmp_deflate.h` into an installable artifact once the
-   wrapper status API is stable.
+1. Keep `019` as the stable fixed/stored public wrapper baseline.
+2. Keep `023` and `024` as scalar-word and NEON fixed-Huffman variants behind
+   stable wrapper/dispatch objects.
+3. Keep `045` as the explicit dynamic-Huffman LZ77 benchmark codec until the
+   stored/fixed/dynamic selector has measured rules.
+4. Use `050` as the whole-stream prepared selector probe and `053` as the
+   split-block fixed/stored/dynamic selector probe before promoting any policy
+   to the stable `asmp_deflate_raw_auto` name.
+5. Keep native harnesses calling public C-profile wrappers, not private clone
+   symbols.
+6. Keep implementation versions registered in `VERSIONS.md`.
+7. Add selector-cost metadata to the generated library manifest so stable
+   wrappers can report and test which policy family they instantiate.

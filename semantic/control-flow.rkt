@@ -366,6 +366,7 @@
       (hash-ref attrs 'export-profile #f)))
 
 (define known-symbol-visibilities '(public hidden local))
+(define known-symbol-bindings '(weak))
 
 (define (known-symbol-visibility? visibility)
   (and (symbol? visibility)
@@ -415,10 +416,22 @@
            visibility))
   visibility)
 
+(define (normalize-function-binding attrs name)
+  (define binding (hash-ref attrs 'binding #f))
+  (when (and binding
+             (not (and (symbol? binding)
+                       (if (memq binding known-symbol-bindings) #t #f))))
+    (error 'control-flow
+           ".function ~a uses unknown binding: ~a"
+           name
+           binding))
+  binding)
+
 (define (normalize-function-public-abi attrs name)
   (define export? (hash-ref attrs 'export #f))
   (define profile (function-public-profile attrs))
   (define visibility (normalize-function-visibility attrs name))
+  (define binding (normalize-function-binding attrs name))
   (define-values (has-public-header-attr? public-header?)
     (function-public-header-attr attrs name))
   (when (and profile (not export?))
@@ -450,10 +463,14 @@
     (if visibility
         (hash-set attrs/base 'visibility visibility)
         attrs/base))
+  (define attrs/binding
+    (if binding
+        (hash-set attrs/visibility 'binding binding)
+        attrs/visibility))
   (define attrs/header
     (if has-public-header-attr?
-        (hash-set attrs/visibility 'public-header? public-header?)
-        attrs/visibility))
+        (hash-set attrs/binding 'public-header? public-header?)
+        attrs/binding))
   (if export?
       (hash-set (hash-set
                  (hash-set attrs/header

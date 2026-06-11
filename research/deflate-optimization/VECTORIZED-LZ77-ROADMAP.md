@@ -89,6 +89,24 @@ through the logical target:
 form in its public fixed/auto wrappers, so the native roundtrip test validates
 both the NEON code path and the source-variant call lowering.
 
+`example/025-deflate-default-neon-dispatch.asm` is the matching build-time
+selector: it provides strong stable raw-deflate API symbols and tail-branches
+to the 024 NEON wrappers when both objects are linked.
+
+`example/026-deflate-default-word-dispatch.asm` provides the same strong stable
+API symbols for the 023 word-extend implementation. This keeps build-time
+selection as object selection for now: link one selector object into the final
+library image.
+
+`example/027-deflate-runtime-dispatch.asm` links both implementations and
+selects at runtime by updating cached target-pointer slots from
+`asmp_deflate_runtime_features`. Bit 0 clear chooses word-extend, bit 0 set
+chooses NEON-extend. Stable public entries load the selected slot and `br` to
+it. The hidden no-header init entrypoint calls a weak hidden detector hook,
+which currently returns baseline NEON and can be replaced by a strong platform
+definition, and then feeds the setter. This is not CPU probing yet; it is the
+runtime dispatch ABI and control-flow shape that future probes can feed.
+
 ## NEON Plan
 
 NEON is the first vector target because it is baseline AArch64.
@@ -207,7 +225,7 @@ Every vector version must pass these before it is considered useful:
 2. zlib raw-inflate roundtrip.
 3. Public wrapper status/error checks.
 4. `git diff --check`, `raco make`, and full Racket test suite.
-5. Native compare runner with scalar 019/023, NEON 024, and zlib rows.
+5. Native compare runner with scalar 019/023, NEON 024, runtime 027, and zlib rows.
 6. Timing runs on repeated, period257, long-repeat, binary, and high-literal
    cases. Treat tiny-input timings as noise.
 

@@ -627,6 +627,16 @@
       ['sve-p 'predicate]
       [c c]))
 
+  (define (assignment-class-matches? rid)
+    (case class
+      [(gpr) (eq? (reg-id-class rid) 'gpr)]
+      [(fpr) (eq? (reg-id-class rid) 'fpr)]
+      [(sve-p) (eq? (reg-id-class rid) 'predicate)]
+      ;; SVE z registers are not represented by a distinct allocator class in
+      ;; the current MVP, so only direct physical z operands are collected below.
+      [(sve-z) #f]
+      [else #f]))
+
   (define cfg (abi-get-class-config abi abi-class))
   ;; callee-saved : bitset | #f — ABI 定义的 callee-saved 寄存器集合
   (define callee-saved (and cfg (reg-callee-saved cfg)))
@@ -648,9 +658,12 @@
         (define regs-from-alloc
           (for/fold ([bs initial-regs])
                     ([kv (in-ordered-map assignment)])
+            (define rid (car kv))
             (define color (cdr kv))
             (define reg-num (abi-color->reg abi abi-class color))
-            (if (and reg-num (bitset-member? callee-saved reg-num))
+            (if (and (assignment-class-matches? rid)
+                     reg-num
+                     (bitset-member? callee-saved reg-num))
                 (bitset-add bs reg-num)
                 bs)))
 

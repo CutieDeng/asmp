@@ -484,6 +484,39 @@ ASM
      (define entry-move-pos (car (regexp-match-positions #rx"mov x[0-9]+, x0" rendered)))
      (check-true (< (car save-pos) (car entry-move-pos))))
 
+   (test-case ".function entry ABI moves are inserted after explicit frame setup"
+     (define results
+       (parse-gnu #<<ASM
+.function api.frame_entry export profile=c-aapcs64 (
+  in: x.dst_len,
+  out: w.status
+)
+entry:
+  .save all
+  mov x29, sp
+  cbz x.dst_len, bad
+  str xzr, [x.dst_len]
+  mov w.status, #0
+  .restore all
+  ret
+bad:
+  mov w.status, #3
+  .restore all
+  ret
+.end
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (expand-inline-cfg (build-cfg (ok-items results))))
+     (define fn (cfg-get-function-by-name cfg 'api.frame_entry))
+     (check-not-false fn)
+     (define rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-function/result (run-pipeline fn default-pipeline-config))))
+     (define frame-pos (car (regexp-match-positions #rx"mov x29, sp" rendered)))
+     (define entry-move-pos (car (regexp-match-positions #rx"mov x[0-9]+, x0" rendered)))
+     (check-true (< (car frame-pos) (car entry-move-pos))))
+
    (test-case ".function return moves are inserted before trailing restore"
      (define results
        (parse-gnu #<<ASM
@@ -1333,6 +1366,26 @@ ASM
      (check-not-false (regexp-match? #rx"\\.octa 1" rendered))
      (check-not-false (regexp-match? #rx"\\.octa 1, 0" rendered))
      (check-not-false (regexp-match? #rx"\\.4byte 7" rendered)))
+
+   (test-case "GNU .data section maps to Apple data section"
+     (define results
+       (parse-gnu #<<ASM
+.data
+.align 3
+.globl runtime_flag
+runtime_flag:
+  .byte8 1
+ASM
+                  ))
+     (check-equal? (parse-results-error-count results) 0)
+     (define cfg (build-cfg (ok-items results)))
+     (define rendered
+       (parameterize ([current-emit-config apple-emit-config])
+         (emit-module cfg)))
+     (check-not-false (regexp-match? #rx"\\.section __DATA,__data" rendered))
+     (check-not-false (regexp-match? #rx"\\.p2align 3" rendered))
+     (check-not-false (regexp-match? #rx"_runtime_flag:" rendered))
+     (check-not-false (regexp-match? #rx"\\.8byte 1" rendered)))
 
    (test-case "GNU data directives reject ambiguous scalar payloads"
      (check-equal? (parse-results-error-count (parse-gnu ".asciz\n")) 1)

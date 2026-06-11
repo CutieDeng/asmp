@@ -563,9 +563,43 @@
        (loop tail (cons (car rest) labels))]
       [_ (append (reverse labels) inserted rest)])))
 
+(define (entry-sp-reg? reg)
+  (and (ast-reg? reg)
+       (eq? (ast-reg-id reg) 'sp)))
+
+(define (entry-fp-reg? reg)
+  (and (ast-reg? reg)
+       (or (and (eq? (ast-reg-kind reg) 'x)
+                (equal? (ast-reg-id reg) 29))
+           (eq? (ast-reg-id reg) 'fp))))
+
+(define (entry-lr-reg? reg)
+  (and (ast-reg? reg)
+       (or (and (eq? (ast-reg-kind reg) 'x)
+                (equal? (ast-reg-id reg) 30))
+           (eq? (ast-reg-id reg) 'lr))))
+
+(define (entry-frame-save-ins? item)
+  (match item
+    [(ast-ins 'stp _ (list left right (? ast-mem? mem)) _)
+     (and (entry-fp-reg? left)
+          (entry-lr-reg? right)
+          (entry-sp-reg? (ast-mem-base mem))
+          (eq? (ast-mem-index-mode mem) 'pre))]
+    [_ #f]))
+
+(define (entry-frame-pointer-ins? item)
+  (match item
+    [(ast-ins 'mov _ (list dst src) _)
+     (and (entry-fp-reg? dst)
+          (entry-sp-reg? src))]
+    [_ #f]))
+
 (define (entry-prefix-directive? item)
-  (and (ast-directive? item)
-       (memq (ast-directive-kind item) '(label save!))))
+  (or (and (ast-directive? item)
+           (memq (ast-directive-kind item) '(label save!)))
+      (entry-frame-save-ins? item)
+      (entry-frame-pointer-ins? item)))
 
 (define (insert-after-entry-prefix body inserted)
   (let loop ([rest body] [prefix '()])

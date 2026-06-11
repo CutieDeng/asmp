@@ -10,6 +10,7 @@
          "../pipeline/regalloc/types.rkt"
          "../codegen/emit.rkt"
          "../vendor/cutie-ftree/ordered-map.rkt"
+         "../vendor/cutie-ftree/bitset.rkt"
          "../vendor/cutie-ftree/pvector.rkt")
 
 (define (source->first-function source)
@@ -152,6 +153,150 @@ ASM
      (check-not-false a-phys)
      (check-not-false b-phys)
      (check-not-equal? a-phys b-phys))
+
+   (test-case "coalesced virtual alias keeps merged interference neighbors"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function coalesced_alias_neighbor (abi aapcs64))
+(: label entry)
+  (mov x.arg x0)
+  (add x.base x1 x2)
+  (mov x.scratch x3)
+  (mov x.read x.arg)
+  (add x.scratch x.scratch x.read)
+  (mov x.cursor x.base)
+  (add x0 x.cursor x.scratch)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define allocation (pipeline-result-allocation result))
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (define arg-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'arg)))
+     (define base-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'base)))
+     (check-not-false arg-phys)
+     (check-not-false base-phys)
+     (check-not-equal? arg-phys base-phys))
+
+   (test-case "coalesced live-across-call aliases keep callee-saved colors"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function coalesced_live_across_call (abi aapcs64))
+(: label entry)
+(: save! all)
+  (mov x29 sp)
+  (mov x.src x0)
+  (bl callee)
+  (mov x.out x.src)
+  (add x0 x.out 1)
+(: load! all)
+  (ret)
+(: label callee)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define allocation (pipeline-result-allocation result))
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (define src-phys (allocated-phys-reg allocation effective-abi (make-virtual-gpr 'src)))
+     (check-not-false src-phys)
+     (check-true (bitset-member? (reg-callee-saved (abi-config-gpr effective-abi))
+                                 src-phys)))
+
+   (test-case "save all filters allocation colors by register class"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function save_all_class_filter (abi aapcs64))
+(: label entry)
+(: save! all)
+  (mov x.v x0)
+(: load! all)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define gpr-x8-color (abi-reg->color arm64-abi 'gpr 8))
+     (check-not-false gpr-x8-color)
+     (define fake-allocation
+       (alloc-result
+        (ordered-map-set (ordered-map-empty reg-id-compare)
+                         (make-virtual-gpr 'v)
+                         gpr-x8-color)
+        (pvector-empty)
+        (ordered-map-empty reg-id-compare)))
+     (define context (analyze-save-load fn fake-allocation #:abi arm64-abi))
+     (define all-expansion (save-load-context-all-expansion context))
+     (check-false (hash-ref all-expansion (cons 'fpr 8) #f))
+     (check-true (hash-ref all-expansion (cons 'gpr 29) #f))
+     (check-true (hash-ref all-expansion (cons 'gpr 30) #f)))
+
+   (test-case "frame pointer setup reserves x29 from virtual allocation"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function frame_pointer_reserves_x29 (abi aapcs64))
+(: label entry)
+(: save! all)
+  (mov x29 sp)
+  (mov x.a x0)
+  (add x.b x.a x1)
+  (add x.c x.b x2)
+  (add x.d x.c x3)
+  (mov x0 x.d)
+(: load! all)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (check-true (reg-banned? (abi-config-gpr effective-abi) 29))
+     (define allocation (pipeline-result-allocation result))
+     (for ([kv (in-ordered-map (alloc-result-assignment allocation))])
+       (define rid (car kv))
+       (define color (cdr kv))
+       (when (eq? (reg-id-class rid) 'gpr)
+         (check-not-equal? (abi-color->reg effective-abi 'gpr color) 29))))
+
+   (test-case "link register x30 is not used for live-across-call values"
+     (define fn
+       (source->first-function
+        #<<ASM
+(: function link_register_not_live_across_call (abi aapcs64))
+(: label entry)
+(: save! all)
+  (mov x.live x0)
+  (bl helper)
+  (add x.result x.live x1)
+  (mov x0 x.result)
+(: load! all)
+  (ret)
+(: end-function)
+ASM
+        ))
+     (define result (run-pipeline fn (make-pipeline-config #:abi arm64-abi)))
+     (check-equal? (pipeline-result-errors result) '())
+     (define effective-abi
+       (multi-class-ig-effective-abi (pipeline-result-interference result)))
+     (check-false (reg-preserved? (abi-config-gpr effective-abi) 30))
+     (define allocation (pipeline-result-allocation result))
+     (define live-color
+       (ordered-map-ref (alloc-result-assignment allocation)
+                        (make-virtual-gpr 'live)
+                        #f))
+     (check-not-false live-color)
+     (check-not-equal? (abi-color->reg effective-abi 'gpr live-color) 30))
 
    (test-case "explicit physical interference prevents precolored coalescing"
      (define fn0

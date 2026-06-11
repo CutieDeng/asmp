@@ -96,6 +96,8 @@ entry:
 
 `visibility=hidden` 在 GNU 输出中生成 `.hidden symbol`，在 Apple 输出中生成 `.private_extern _symbol`；`visibility=local` 保留函数体但不写 `.globl`。`header` / `no-header` 只影响 `--public-c-header`，不影响函数是否输出或能否被同一构建图里的 `.call` / `bl` 引用。为兼容旧代码，未显式写 `header` / `no-header` 的 C-like public root 仍会参与 header 生成；内部 raw 内核应显式写 `no-header`。
 
+`weak` 或 `binding=weak` 可以把 exported 函数作为链接期默认实现输出。GNU 输出 `.weak symbol`；Apple/Mach-O 输出 `.weak_definition _symbol`、`.globl _symbol`，并在模块末尾输出 `.subsections_via_symbols`，这样单独链接时 C 对象能解析该符号，和强定义一起链接时强定义可以覆盖它。这个能力适合 deflate 这类库的 build-time default entry：实验版本可以提供 weak `asmp_deflate_raw_*`，最终构建或基准对比中再由强符号选择真正默认实现。
+
 `c-aapcs64`、`apple-c-arm64`、`linux-syscall`、`kernel-aarch64` 目前只允许 ordinary entry ABI：未写 `abi`、`abi=aapcs64`、`abi=arm64`、`abi=leaf`、`abi=naked`。`jit-private` 和 `project-abi` 则必须显式写 `abi=<name>`，因为外部调用者要知道它承诺的是哪套项目私有约定：
 
 ```asm
@@ -113,7 +115,7 @@ entry:
 racket cli/as.rkt --gnu-input --public-abi-manifest public-abi.rktd input.asm
 ```
 
-manifest 是可读写的 Racket datum，记录所有 exported public root 的 concrete symbol、logical name、profile、显式 `abi` 和源码位置。后续 header/manifest 生成、dispatcher、debug/profile 归并都应优先消费这个边界清单，而不是扫描最终汇编文本。
+manifest 是可读写的 Racket datum，记录所有 exported public root 的 concrete symbol、logical name、profile、link binding、显式 `abi` 和源码位置。后续 header/manifest 生成、dispatcher、debug/profile 归并都应优先消费这个边界清单，而不是扫描最终汇编文本。
 
 对于简单 C-like public root，也可以直接生成 C header：
 
@@ -474,6 +476,7 @@ ldr  x0, [x0, :got_lo12:symbol]
 
 ```asm
 .section .rodata
+.align 3
 label:
   .ascii "bytes without trailing zero"
   .asciz "zero terminated string"
@@ -501,6 +504,11 @@ label:
 `.byteN` 中的 `N` 是编码宽度。`.byte4 1` 表示把整数 `1` 编码成一个 4 字节整数槽位；在常见 AArch64 little-endian 目标上，对应字节是 `01 00 00 00`。`.byte4 0x12345678` 对应 `78 56 34 12`。负数按该宽度的二补码编码。它不是字符串，也不是把后面的参数拆成 4 个 `.byte`。
 
 `.word` 仅作为 GNU 兼容输入别名接受，并会规范化为 `.byte4`；新代码请使用显式宽度。`.byte*` 不接收字符串字面量，字符串数据请使用 `.ascii` / `.asciz`。暂不做完整 GNU 表达式求值，复杂表达式会尽量保留为符号/relocation 或报错。下面这些目前不是稳定接口：
+
+函数外的 `.align` / `.p2align` 在 `.text` 中仍作为下一个函数的 pending
+alignment 使用；在 `.data`、`.rodata` 或其它非 text section 中会作为普通
+module directive 输出。Apple 输出会写成 `.p2align N`，因此 8 字节函数指针槽
+应使用 `.align 3`。
 
 - 输入中的手写 `.cfi_*` 透传；
 - 宏、条件汇编、复杂表达式求值；

@@ -179,6 +179,24 @@
         (port-newline port)])]
     [else (void)]))
 
+(define (emit-symbol-binding/port fn-name binding port prefix config)
+  (case binding
+    [(weak)
+     (case (emit-config-syntax config)
+       [(apple)
+        (port-write-string port ".weak_definition ")
+        (emit-asm-symbol/port fn-name port prefix)
+        (port-newline port)
+        (port-write-string port ".globl ")]
+       [else
+        (port-write-string port ".weak ")])
+     (emit-asm-symbol/port fn-name port prefix)
+     (port-newline port)]
+    [else
+     (port-write-string port ".globl ")
+     (emit-asm-symbol/port fn-name port prefix)
+     (port-newline port)]))
+
 ;; ============================================================
 ;; 端口输出辅助函数
 ;; ============================================================
@@ -921,6 +939,7 @@
     [(apple)
      (case (string->symbol raw)
        [(.rodata) "__TEXT,__const"]
+       [(.data) "__DATA,__data"]
        [(.bss) "__DATA,__bss"]
        [else raw])]
     [else raw]))
@@ -1340,10 +1359,9 @@
     ;; 函数头 - 仅在有 (export) 属性时输出 .globl
     (define is-export? (fn-get-info fn 'export #f))
     (define visibility (fn-get-info fn 'visibility #f))
+    (define binding (fn-get-info fn 'binding #f))
     (when (and is-export? (not (eq? visibility 'local)))
-      (port-write-string port ".globl ")
-      (emit-asm-symbol/port fn-name port prefix)
-      (port-newline port)
+      (emit-symbol-binding/port fn-name binding port prefix config)
       (emit-symbol-visibility/port fn-name visibility port prefix config))
 
     ;; 对齐指令 (使用函数属性或默认值)
@@ -1485,7 +1503,10 @@
 
   (emit-debug-text-end/port port)
   (emit-module-items/port (cfg-get-info cfg 'module-items '()) port)
-  (emit-debug-dwarf-footer/port port))
+  (emit-debug-dwarf-footer/port port)
+  (when (eq? (emit-config-syntax config) 'apple)
+    (port-write-string port ".subsections_via_symbols")
+    (port-newline port)))
 
 (define (emit-module-items/port items port)
   (when (pair? items)

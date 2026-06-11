@@ -47,8 +47,92 @@ racket cli/as.rkt --gnu-input --elim -o /tmp/deflate-fixed-chain.s example/019-d
 racket cli/as.rkt --gnu-input --apple --elim --public-c-header /tmp/asmp_deflate.h -o /tmp/deflate-fixed-chain.s example/019-deflate-fixed-chain.asm
 
 # deflate NEON match-extension variant; wrappers select the hand-written core
-# through logical `.call ... feature=neon` / `variant=neon-extend`
+# through logical `.call ... feature=neon` / `variant=neon-extend`, and expose
+# weak stable `asmp_deflate_raw_*` defaults for standalone library builds
 racket cli/as.rkt --gnu-input --apple --elim --public-c-header /tmp/asmp_neonextend.h -o /tmp/deflate-neon-extend.s example/024-deflate-fixed-chain-neon-extend.asm
+
+# strong default selector: stable `asmp_deflate_raw_*` tail-branches to the
+# versioned NEON-extend wrappers from 024 when both objects are linked
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-default-neon-dispatch.s example/025-deflate-default-neon-dispatch.asm
+
+# alternate strong default selector for the 023 word-extend implementation
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-default-word-dispatch.s example/026-deflate-default-word-dispatch.asm
+
+# runtime selector: stable `asmp_deflate_raw_*` jumps through cached word/NEON slots
+racket cli/as.rkt --gnu-input --apple --elim --public-c-header /tmp/asmp_runtime_dispatch.h -o /tmp/deflate-runtime-dispatch.s example/027-deflate-runtime-dispatch.asm
+
+# dynamic-Huffman literal-only pipeline: histogram + balanced lengths +
+# canonical/bit-order code tables + simple non-RLE dynamic header
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-dynamic-balanced.s example/030-deflate-dynamic-balanced-litonly.asm
+
+# code-length RLE helper for the next compact dynamic-header step
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-code-length-rle.s example/031-deflate-dynamic-code-length-rle.asm
+
+# bit-length alphabet frequency helper consuming 031 RLE events
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-blfreq.s example/032-deflate-dynamic-blfreq.asm
+
+# balanced bit-length code-length helper consuming bl_freq[19]
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-bllen.s example/033-deflate-dynamic-bllen-balanced.asm
+
+# compact dynamic-header HCLEN/blcodes helper consuming bl_len[19]
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-blcodes.s example/034-deflate-dynamic-blcodes-count.asm
+
+# compact dynamic-Huffman header bit emitter consuming bl_len/bl_bit_code/RLE events
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-compact-header.s example/035-deflate-dynamic-compact-header.asm
+
+# dynamic-Huffman literal-only pipeline with compact RLE header
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-compact-balanced.s example/036-deflate-dynamic-compact-balanced-litonly.asm
+
+# dynamic-Huffman HLIT/HDIST trimming helper
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-code-counts.s example/037-deflate-dynamic-code-counts.asm
+
+# dynamic-Huffman literal-only pipeline with compact RLE header and trimmed counts
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-compact-trimmed.s example/038-deflate-dynamic-compact-trimmed-litonly.asm
+
+# frequency-driven literal/length Huffman length helper
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-litlen-huffman.s example/039-deflate-dynamic-litlen-huffman.asm
+
+# dynamic-Huffman literal-only pipeline with frequency-driven LL tree
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-compact-huffman.s example/040-deflate-dynamic-compact-huffman-litonly.asm
+
+# frequency-driven bit-length Huffman length helper
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-bllen-huffman.s example/041-deflate-dynamic-bllen-huffman.asm
+
+# dynamic-Huffman literal-only pipeline with frequency-driven LL and BL trees
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-compact-dual-huffman.s example/042-deflate-dynamic-compact-dual-huffman-litonly.asm
+
+# dynamic-Huffman LZ77 token frequency helper
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-lz77-freq.s example/043-deflate-dynamic-lz77-freq.asm
+
+# frequency-driven distance Huffman length helper
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-distlen-huffman.s example/044-deflate-dynamic-distlen-huffman.asm
+
+# dynamic-Huffman pipeline with LZ77 payload
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-lz77-huffman.s example/045-deflate-dynamic-lz77-huffman.asm
+
+# experimental fixed/stored-vs-dynamic selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-auto-dynamic-probe.s example/046-deflate-auto-dynamic-probe.asm
+
+# experimental LZ77-evidence selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-auto-cost-probe.s example/047-deflate-auto-cost-probe.asm
+
+# experimental estimated-size selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-auto-size-probe.s example/048-deflate-auto-size-probe.asm
+
+# experimental prepared estimated-size selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-auto-prepared-size-probe.s example/049-deflate-auto-prepared-size-probe.asm
+
+# experimental cheap-gated prepared estimated-size selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-auto-cheap-prepared-size-probe.s example/050-deflate-auto-cheap-prepared-size-probe.asm
+
+# experimental split-block fixed-Huffman stream probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-blocked-fixed.s example/051-deflate-blocked-fixed.asm
+
+# experimental split-block fixed/stored selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-blocked-auto.s example/052-deflate-blocked-auto.asm
+
+# experimental split-block fixed/stored/dynamic selector probe
+racket cli/as.rkt --gnu-input --apple --elim -o /tmp/deflate-blocked-dynamic-auto.s example/053-deflate-blocked-dynamic-auto.asm
 
 # 托管 .function/.call 基础示例
 racket cli/as.rkt --gnu-input --gnu --elim -o /tmp/managed-basic.s example/014-managed-call-basic.asm
@@ -177,6 +261,35 @@ x.name w.temp           ; 虚拟寄存器以 . 开头
 | `022-deflate-dynamic-litlen-balanced.asm` | balanced literal/length code-length helper for dynamic Huffman scaffolding |
 | `023-deflate-fixed-chain-word-extend.asm` | fixed-Huffman hash-chain deflate with 8-byte LZ77 match extension |
 | `024-deflate-fixed-chain-neon-extend.asm` | fixed-Huffman hash-chain deflate with NEON-assisted LZ77 match extension |
+| `025-deflate-default-neon-dispatch.asm` | strong stable deflate API selector that tail-branches to the 024 NEON wrappers |
+| `026-deflate-default-word-dispatch.asm` | strong stable deflate API selector that tail-branches to the 023 word-extend wrappers |
+| `027-deflate-runtime-dispatch.asm` | runtime stable deflate API selector with cached target slots controlled by a feature word |
+| `028-deflate-dynamic-canonical-codes.asm` | canonical-code helper for dynamic Huffman code-length tables |
+| `029-deflate-dynamic-reverse-codes.asm` | bit-reversed code-table helper for deflate Huffman emission |
+| `030-deflate-dynamic-balanced-litonly.asm` | native literal-only dynamic-Huffman pipeline using 021/022/028/029 with a simple non-RLE dynamic header |
+| `031-deflate-dynamic-code-length-rle.asm` | native code-length RLE event helper for compact dynamic-Huffman headers |
+| `032-deflate-dynamic-blfreq.asm` | native bit-length alphabet frequency helper consuming 031 RLE events |
+| `033-deflate-dynamic-bllen-balanced.asm` | balanced bit-length code-length helper consuming `bl_freq[19]` |
+| `034-deflate-dynamic-blcodes-count.asm` | compact dynamic-header `HCLEN + 4` helper consuming `bl_len[19]` |
+| `035-deflate-dynamic-compact-header.asm` | compact dynamic-Huffman header bit emitter consuming `bl_len`, `bl_bit_code`, and 031 RLE events |
+| `036-deflate-dynamic-compact-balanced-litonly.asm` | native literal-only dynamic-Huffman pipeline with compact RLE header using 031/032/033 |
+| `037-deflate-dynamic-code-counts.asm` | dynamic-header `HLIT/HDIST` code-count helper consuming LL/DIST length tables |
+| `038-deflate-dynamic-compact-trimmed-litonly.asm` | native literal-only dynamic-Huffman pipeline with compact RLE header and trimmed `HLIT/HDIST` counts |
+| `039-deflate-dynamic-litlen-huffman.asm` | frequency-driven literal/length Huffman length helper using a simple native tree builder |
+| `040-deflate-dynamic-compact-huffman-litonly.asm` | native literal-only dynamic-Huffman pipeline using 039 for the LL tree and balanced BL-tree scaffold |
+| `041-deflate-dynamic-bllen-huffman.asm` | frequency-driven bit-length Huffman length helper using a simple native tree builder |
+| `042-deflate-dynamic-compact-dual-huffman-litonly.asm` | native literal-only dynamic-Huffman pipeline using 039 for the LL tree and 041 for the BL tree |
+| `043-deflate-dynamic-lz77-freq.asm` | native LZ77 token frequency helper filling LL and distance histograms for dynamic-Huffman blocks |
+| `044-deflate-dynamic-distlen-huffman.asm` | frequency-driven distance Huffman length helper reusing 039's 15-bit tree builder |
+| `045-deflate-dynamic-lz77-huffman.asm` | native dynamic-Huffman pipeline with 019-style LZ77 payload emission |
+| `046-deflate-auto-dynamic-probe.asm` | experimental raw-deflate selector: tiny inputs use fixed/stored auto, larger inputs use 045 dynamic-Huffman LZ77 |
+| `047-deflate-auto-cost-probe.asm` | experimental raw-deflate selector: chooses dynamic only when the LZ77 frequency pass reports enough match tokens |
+| `048-deflate-auto-size-probe.asm` | experimental raw-deflate selector: estimates fixed/stored/dynamic byte size before choosing 045 dynamic-Huffman LZ77 |
+| `049-deflate-auto-prepared-size-probe.asm` | experimental raw-deflate selector: reuses prepared dynamic metadata when the estimated-size selector chooses dynamic |
+| `050-deflate-auto-cheap-prepared-size-probe.asm` | experimental raw-deflate selector: cheap-gates large low-match input before the prepared estimated-size selector |
+| `051-deflate-blocked-fixed.asm` | experimental raw-deflate split-block fixed-Huffman stream: adjacent blocks share one bit buffer and only the final block sets BFINAL |
+| `052-deflate-blocked-auto.asm` | experimental raw-deflate split-block fixed/stored selector: rewinds a speculative fixed block and emits stored when smaller |
+| `053-deflate-blocked-dynamic-auto.asm` | experimental raw-deflate split-block fixed/stored/dynamic selector: prepares dynamic metadata per block and falls back to fixed/stored when dynamic does not win |
 
 GNU 输入前端的完整简明说明见 [`docs/gnu-frontend-syntax.md`](../docs/gnu-frontend-syntax.md)。
 

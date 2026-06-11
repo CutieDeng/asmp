@@ -841,3 +841,96 @@ auto_public_done:
   .restore all
   ret
 .end
+
+// ------------------------------------------------------------
+// Stable raw-deflate library entrypoints for this build.
+//
+// These keep the external C surface independent from the selected internal
+// implementation. This 024 build selects the NEON-extend variant; future builds
+// can point the same public names at scalar, word-extend, SVE, or runtime
+// dispatch implementations without changing callers.
+// ------------------------------------------------------------
+.function asmp_deflate_raw_bound export weak profile=c-aapcs64 (
+  in: x.src_len,
+  out: x.bound
+)
+entry:
+  ubfm x.extra, x.src_len, #3, #63
+  add x.bound, x.src_len, x.extra
+  add x.bound, x.bound, #64
+  ret
+.end
+
+.function asmp_deflate_raw_scratch_size export weak profile=c-aapcs64 (
+  out: x.size
+)
+entry:
+  mov x.size, #262144
+  ret
+.end
+
+.function asmp_deflate_raw_scratch_align export weak profile=c-aapcs64 (
+  out: x.align
+)
+entry:
+  mov x.align, #16
+  ret
+.end
+
+.function asmp_deflate_raw_fixed export weak profile=c-aapcs64 (
+  in: x.dst, x.dst_cap, x.dst_len, x.src, x.src_len, x.scratch, x.scratch_len,
+  out: w.status
+)
+entry:
+  .save all
+  .call asmp_deflate_raw_fixed_neon_extend (
+    x.dst=x.dst,
+    x.dst_cap=x.dst_cap,
+    x.dst_len=x.dst_len,
+    x.src=x.src,
+    x.src_len=x.src_len,
+    x.scratch=x.scratch,
+    x.scratch_len=x.scratch_len,
+    w.status=w.status
+  )
+  .restore all
+  ret
+.end
+
+.function asmp_deflate_raw_stored export weak profile=c-aapcs64 (
+  in: x.dst, x.dst_cap, x.dst_len, x.src, x.src_len,
+  out: w.status
+)
+entry:
+  .save all
+  .call asmp_deflate_raw_stored_neon_extend (
+    x.dst=x.dst,
+    x.dst_cap=x.dst_cap,
+    x.dst_len=x.dst_len,
+    x.src=x.src,
+    x.src_len=x.src_len,
+    w.status=w.status
+  )
+  .restore all
+  ret
+.end
+
+.function asmp_deflate_raw_auto export weak profile=c-aapcs64 (
+  in: x.dst, x.dst_cap, x.dst_len, x.src, x.src_len, x.scratch, x.scratch_len,
+  out: w.status
+)
+entry:
+  .save all
+  .call asmp_deflate_raw_auto_neon_extend (
+    x.dst=x.dst,
+    x.dst_cap=x.dst_cap,
+    x.dst_len=x.dst_len,
+    x.src=x.src,
+    x.src_len=x.src_len,
+    x.scratch=x.scratch,
+    x.scratch_len=x.scratch_len,
+    w.status=w.status
+  )
+  .restore all
+  ret
+.end

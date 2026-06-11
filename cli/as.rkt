@@ -960,7 +960,10 @@
                 function-sections
                 (list (emit-debug-text-end)
                       module-section
-                      (emit-debug-dwarf-footer))))
+                      (emit-debug-dwarf-footer)
+                      (if (eq? (asm-syntax) 'apple)
+                          ".subsections_via_symbols"
+                          ""))))
        "\n\n")))))
 
   (when (>= (verbose-level) 1)

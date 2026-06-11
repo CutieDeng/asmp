@@ -155,6 +155,7 @@
         'logical-name (fn-logical-name fn)
         'linkage-symbol (fn-linkage-symbol fn)
         'visibility (fn-get-info fn 'visibility 'public)
+        'binding (fn-get-info fn 'binding 'strong)
         'header? (fn-get-info fn 'public-header? #t)
         'profile (fn-public-abi-profile fn)
         'profile-explicit? (fn-public-abi-profile-explicit? fn)
@@ -310,6 +311,12 @@
 
 (define (known-c-prototype entry)
   (case (hash-ref entry 'name #f)
+    [(asmp_deflate_raw_bound)
+     "extern uint64_t asmp_deflate_raw_bound(uint64_t src_len);"]
+    [(asmp_deflate_raw_scratch_size)
+     "extern uint64_t asmp_deflate_raw_scratch_size(void);"]
+    [(asmp_deflate_raw_scratch_align)
+     "extern uint64_t asmp_deflate_raw_scratch_align(void);"]
     [(asmp_deflate_raw_fixed asmp_deflate_raw_auto)
      (format "extern int ~a(uint8_t * dst, uint64_t dst_cap, uint64_t * dst_len, const uint8_t * src, uint64_t src_len, void * scratch, uint64_t scratch_len);"
              (entry-c-name entry))]
@@ -317,7 +324,9 @@
      "extern int asmp_deflate_raw_stored(uint8_t * dst, uint64_t dst_cap, uint64_t * dst_len, const uint8_t * src, uint64_t src_len);"]
     [else #f]))
 
-(define (public-c-header manifest #:guard [guard "ASMP_PUBLIC_ABI_H"])
+(define (public-c-header manifest
+                         #:guard [guard "ASMP_PUBLIC_ABI_H"]
+                         #:body-prefix [body-prefix ""])
   (define exports (hash-ref manifest 'exports '()))
   (define-values (prototypes skips)
     (for/fold ([prototypes '()]
@@ -342,6 +351,11 @@
    "#define ASMP_PUBLIC_SYM(name)\n"
    "#endif\n\n"
    "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
+   (if (string=? body-prefix "")
+       ""
+       (string-append body-prefix
+                      (if (string-suffix? body-prefix "\n") "" "\n")
+                      "\n"))
    (if (null? prototypes)
        ""
        (string-append (string-join prototypes "\n") "\n"))
@@ -353,10 +367,15 @@
    "#undef ASMP_PUBLIC_SYM\n\n"
    (format "#endif /* ~a */\n" guard)))
 
-(define (write-public-c-header manifest path #:guard [guard "ASMP_PUBLIC_ABI_H"])
+(define (write-public-c-header manifest path
+                               #:guard [guard "ASMP_PUBLIC_ABI_H"]
+                               #:body-prefix [body-prefix ""])
   (call-with-output-file path
     (lambda (out)
-      (display (public-c-header manifest #:guard guard) out))
+      (display (public-c-header manifest
+                                #:guard guard
+                                #:body-prefix body-prefix)
+               out))
     #:exists 'truncate/replace))
 
 (define (format-srcloc* loc)

@@ -667,6 +667,9 @@
               [(visibility)
                (hash-set attrs 'visibility
                          (string->symbol (string-downcase value)))]
+              [(binding)
+               (hash-set attrs 'binding
+                         (string->symbol (string-downcase value)))]
               [(header)
                (hash-set attrs 'header
                          (string->symbol (string-downcase value)))]
@@ -675,6 +678,7 @@
       [else
        (case (string->symbol (string-downcase part))
          [(export) (hash-set attrs 'export #t)]
+         [(weak) (hash-set attrs 'binding 'weak)]
          [(header) (hash-set attrs 'header #t)]
          [(no-header noheader) (hash-set attrs 'no-header #t)]
          [else (error 'gnu-parser "invalid .function attribute: ~a" part)])])))
@@ -866,9 +870,13 @@
      (define n (parse-number-token (car (parse-list-after-directive rest))))
      (unless n
        (error 'gnu-parser "invalid alignment: ~a" rest))
-     (if (gnu-state-in-function? st)
-         (values (list (ast-directive 'align #f (list n) (loc source line))) st)
-         (values '() (struct-copy gnu-state st [pending-align n])))]
+     (cond
+       [(gnu-state-in-function? st)
+        (values (list (ast-directive 'align #f (list n) (loc source line))) st)]
+       [(eq? (gnu-state-section st) 'text)
+        (values '() (struct-copy gnu-state st [pending-align n]))]
+       [else
+        (values (list (ast-directive 'align #f (list n) (loc source line))) st)])]
     ["asmp.function"
      (define parts (parse-token-list-after-directive rest))
      (when (null? parts)

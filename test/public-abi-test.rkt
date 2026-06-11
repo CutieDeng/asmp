@@ -195,6 +195,36 @@ ASM
      (check-not-false (regexp-match? #rx"\\.globl _raw\\.impl" apple-rendered))
      (check-not-false (regexp-match? #rx"\\.private_extern _raw\\.impl" apple-rendered)))
 
+   (test-case "weak public default emits platform weak binding"
+     (define cfg
+       (cfg-from-gnu
+        #<<ASM
+.function api.default export weak profile=c-aapcs64 (
+  out: x.value
+)
+entry:
+  ret
+.end
+ASM
+        ))
+     (define fn (cfg-get-function-by-name cfg 'api.default))
+     (check-not-false fn)
+     (check-equal? (fn-get-info fn 'binding #f) 'weak)
+     (define entry (car (hash-ref (public-abi-manifest cfg) 'exports)))
+     (check-equal? (hash-ref entry 'binding) 'weak)
+     (define gnu-rendered
+       (parameterize ([current-emit-config default-emit-config])
+         (emit-module cfg)))
+     (check-not-false (regexp-match? #rx"\\.weak api\\.default" gnu-rendered))
+     (check-false (regexp-match? #rx"\\.globl api\\.default" gnu-rendered))
+     (define apple-rendered
+       (parameterize ([current-emit-config apple-emit-config])
+         (emit-module cfg)))
+     (check-not-false
+      (regexp-match? #rx"\\.weak_definition _api\\.default" apple-rendered))
+     (check-not-false (regexp-match? #rx"\\.globl _api\\.default" apple-rendered))
+     (check-not-false (regexp-match? #rx"\\.subsections_via_symbols" apple-rendered)))
+
    (test-case "public ABI manifest records managed signature parameters"
      (define cfg
        (cfg-from-gnu
@@ -330,6 +360,21 @@ ASM
      (define cfg
        (cfg-from-gnu
         #<<ASM
+.function asmp_deflate_raw_bound export profile=c-aapcs64 ()
+entry:
+  ret
+.end
+
+.function asmp_deflate_raw_scratch_size export profile=c-aapcs64 ()
+entry:
+  ret
+.end
+
+.function asmp_deflate_raw_scratch_align export profile=c-aapcs64 ()
+entry:
+  ret
+.end
+
 .function asmp_deflate_raw_fixed export profile=c-aapcs64 ()
 entry:
   ret
@@ -338,10 +383,19 @@ ASM
         ))
      (define header (public-c-header (public-abi-manifest cfg)))
      (check-not-false
+      (regexp-match? #rx"extern uint64_t asmp_deflate_raw_bound\\(uint64_t src_len\\);"
+                     header))
+     (check-not-false
+      (regexp-match? #rx"extern uint64_t asmp_deflate_raw_scratch_size\\(void\\);"
+                     header))
+     (check-not-false
+      (regexp-match? #rx"extern uint64_t asmp_deflate_raw_scratch_align\\(void\\);"
+                     header))
+     (check-not-false
       (regexp-match? #rx"extern int asmp_deflate_raw_fixed\\(uint8_t \\* dst, uint64_t dst_cap, uint64_t \\* dst_len, const uint8_t \\* src, uint64_t src_len, void \\* scratch, uint64_t scratch_len\\);"
                      header))
      (check-false
-      (regexp-match? #rx"skipped asmp_deflate_raw_fixed" header)))
+      (regexp-match? #rx"skipped asmp_deflate_raw_" header)))
 
    (test-case "public ABI manifest can be written as rktd"
      (define cfg

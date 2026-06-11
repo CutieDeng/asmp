@@ -289,7 +289,7 @@
                                 [coalesced-moves (cons move (allocator-state-coalesced-moves st1))]) u)]
     [(or (let ([vi (ordered-map-ref (allocator-state-reg-index st1) v #f)])
            (and vi (bitset-member? (allocator-state-precolored st1) vi)))
-         (ig-interferes? (allocator-state-ig st1) u v))
+         (effective-interferes? st1 u v))
      (let ([st2 (struct-copy allocator-state st1
                              [constrained-moves (cons move (allocator-state-constrained-moves st1))])])
        (add-worklist (add-worklist st2 u) v))]
@@ -305,6 +305,36 @@
       (get-alias state (ordered-map-ref (allocator-state-coalesce-map state) reg reg))
       reg))
 
+(define (alias-class-members state reg)
+  (define rep (get-alias state reg))
+  (define index-reg (allocator-state-index-reg state))
+  (for/list ([i (in-range (pvector-length index-reg))]
+             #:when (equal? (get-alias state (pvector-ref index-reg i)) rep))
+    (pvector-ref index-reg i)))
+
+(define (effective-neighbors state reg)
+  (define ig (allocator-state-ig state))
+  (define rep (get-alias state reg))
+  (remove-duplicates
+   (filter
+    (lambda (neighbor)
+      (not (equal? (get-alias state neighbor) rep)))
+    (apply append
+           (for/list ([member (in-list (alias-class-members state reg))])
+             (ig-neighbors ig member))))))
+
+(define (effective-interferes? state a b)
+  (define b-rep (get-alias state b))
+  (for/or ([neighbor (in-list (effective-neighbors state a))])
+    (equal? (get-alias state neighbor) b-rep)))
+
+(define (effective-live-across-call? state reg)
+  (define ig (allocator-state-ig state))
+  (define reg-index (allocator-state-reg-index state))
+  (for/or ([member (in-list (alias-class-members state reg))])
+    (define idx (ordered-map-ref reg-index member #f))
+    (and idx (ig-live-across-call? ig idx))))
+
 (define (can-coalesce? state u v)
   (define ig (allocator-state-ig state))
   (define reg-index (allocator-state-reg-index state))
@@ -317,7 +347,7 @@
   ;; 如果 v 是 live-across-call 的虚拟寄存器，u 是 caller-saved 物理寄存器，禁止合并
   (define (violates-live-across-call? phys-reg virt-reg virt-idx)
     (and virt-idx
-         (ig-live-across-call? ig virt-idx)
+         (effective-live-across-call? state virt-reg)
          (reg-id-physical? phys-reg)
          (not (is-callee-saved-physical? phys-reg abi))))
 
@@ -333,7 +363,7 @@
     (define alias (get-alias state neighbor))
     (define degree (ordered-map-ref (allocator-state-degree state) neighbor 0))
     (and (not (equal? alias precolored-reg))
-         (or (ig-interferes? ig alias precolored-reg)
+         (or (effective-interferes? state alias precolored-reg)
              (precolored-reg? alias)
              (< degree k))))
 
@@ -353,7 +383,7 @@
              (violates-live-across-call? u v vi))
         #f]
        [else
-        (for/and ([t (in-list (ig-neighbors ig v))])
+        (for/and ([t (in-list (effective-neighbors state v))])
           (precolored-neighbor-ok? t u))])]
     ;; v 是预着色（物理），u 是虚拟
     [(and vi (bitset-member? (allocator-state-precolored state) vi))
@@ -366,10 +396,13 @@
              (violates-live-across-call? v u ui))
         #f]
        [else
-        (for/and ([t (in-list (ig-neighbors ig u))])
+        (for/and ([t (in-list (effective-neighbors state u))])
           (precolored-neighbor-ok? t v))])]
     [else
-     (define combined (remove-duplicates (append (ig-neighbors ig u) (ig-neighbors ig v))))
+     (define combined
+       (remove-duplicates
+        (append (effective-neighbors state u)
+                (effective-neighbors state v))))
      (define high-deg (for/sum ([n (in-list combined)])
                        (if (>= (ordered-map-ref (allocator-state-degree state) n 0) k) 1 0)))
      (< high-deg k)]))
@@ -503,7 +536,7 @@
       (for/fold ([used bitset-empty])
                 ([m (in-list members)])
         (for/fold ([u used])
-                  ([neighbor (in-list (ig-neighbors ig m))])
+                  ([neighbor (in-list (effective-neighbors st m))])
           (if (member neighbor members)
               u
               (let* ([alias (get-alias st neighbor)]
@@ -571,11 +604,11 @@
     (if (or already-colored? already-spilled?)
         st
         (let* ([idx (ordered-map-ref (allocator-state-reg-index st) reg #f)]
-               [is-live-across-call? (and idx (ig-live-across-call? ig idx))]
+               [is-live-across-call? (and idx (effective-live-across-call? st reg))]
                [allowed-colors (if is-live-across-call? callee-saved-colors #f)]
                [used-colors
                 (for/fold ([used bitset-empty])
-                          ([neighbor (in-list (ig-neighbors ig reg))])
+                          ([neighbor (in-list (effective-neighbors st reg))])
                   (define alias (get-alias st neighbor))
                   (define color (ordered-map-ref (allocator-state-color-map st) alias #f))
                   (if color (bitset-add used color) used))]

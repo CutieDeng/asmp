@@ -102,6 +102,86 @@
             (set! found #t))))))
   found)
 
+(define (entry-sp-reg? op)
+  (and (ast-reg? op)
+       (equal? (ast-reg-id op) 'sp)))
+
+(define (entry-fp-reg? op)
+  (and (ast-reg? op)
+       (or (and (eq? (ast-reg-kind op) 'x)
+                (equal? (ast-reg-id op) 29))
+           (equal? (ast-reg-id op) 'fp))))
+
+(define (entry-lr-reg? op)
+  (and (ast-reg? op)
+       (or (and (eq? (ast-reg-kind op) 'x)
+                (equal? (ast-reg-id op) 30))
+           (equal? (ast-reg-id op) 'lr))))
+
+(define (entry-save-directive? ins)
+  (and (ast-directive? ins)
+       (eq? (ast-directive-kind ins) 'save!)))
+
+(define (entry-frame-save-ins? ins)
+  (and (ast-ins? ins)
+       (eq? (ast-ins-mnemonic ins) 'stp)
+       (let ([ops (ast-ins-operands ins)])
+         (and (>= (length ops) 3)
+              (entry-fp-reg? (car ops))
+              (entry-lr-reg? (cadr ops))
+              (ast-mem? (caddr ops))
+              (let ([mem (caddr ops)])
+                (and (eq? (ast-mem-index-mode mem) 'pre)
+                     (entry-sp-reg? (ast-mem-base mem))))))))
+
+(define (entry-frame-pointer-ins? ins)
+  (and (ast-ins? ins)
+       (eq? (ast-ins-mnemonic ins) 'mov)
+       (let ([ops (ast-ins-operands ins)])
+         (and (= (length ops) 2)
+              (entry-fp-reg? (car ops))
+              (entry-sp-reg? (cadr ops))))))
+
+(define (fn-establishes-frame-pointer? fn)
+  (define entry-bb (fn-entry-block fn))
+  (and entry-bb
+       (let ([instructions (basic-block-instructions entry-bb)])
+         (define prefix-len (min 8 (pvector-length instructions)))
+         (define has-frame-save?
+           (for/or ([i (in-range prefix-len)])
+             (define ins (pvector-ref instructions i))
+             (or (entry-save-directive? ins)
+                 (entry-frame-save-ins? ins))))
+         (and has-frame-save?
+              (for/or ([i (in-range (min 16 (pvector-length instructions)))])
+                (entry-frame-pointer-ins? (pvector-ref instructions i)))))))
+
+(define (reg-class-ban-reg cfg reg-num)
+  (make-reg-class-config
+   #:num-regs (reg-class-config-num-regs cfg)
+   #:banned (bitset-add (reg-class-config-banned cfg) reg-num)
+   #:preserved (bitset-remove (reg-class-config-preserved cfg) reg-num)
+   #:arg-regs (reg-class-config-arg-regs cfg)
+   #:return-regs (reg-class-config-return-regs cfg)))
+
+(define (reg-class-unpreserve-reg cfg reg-num)
+  (make-reg-class-config
+   #:num-regs (reg-class-config-num-regs cfg)
+   #:banned (reg-class-config-banned cfg)
+   #:preserved (bitset-remove (reg-class-config-preserved cfg) reg-num)
+   #:arg-regs (reg-class-config-arg-regs cfg)
+   #:return-regs (reg-class-config-return-regs cfg)))
+
+(define (abi-ban-gpr-reg abi reg-num)
+  (abi-config (reg-class-ban-reg (abi-config-gpr abi) reg-num)
+              (abi-config-fpr abi)
+              (abi-config-pred abi)))
+
+(define (abi-unpreserve-gpr-reg abi reg-num)
+  (abi-config (reg-class-unpreserve-reg (abi-config-gpr abi) reg-num)
+              (abi-config-fpr abi)
+              (abi-config-pred abi)))
+
 (define (build-interference-graphs fn liveness #:abi [abi arm64-abi])
   ;; 按 class 分组所有寄存器
   (define reg-index (fn-liveness-reg-index liveness))
@@ -169,7 +249,20 @@
   ;; 检查是否有 save! 声明，决定可用寄存器范围
   ;; 没有 save! 时只能使用 scratch-reg，不能使用 callee-saved
   (define has-save? (fn-has-save-directive? fn))
-  (define effective-abi (if has-save? abi (abi-scratch-only abi)))
+  (define effective-abi/base (if has-save? abi (abi-scratch-only abi)))
+  ;; x30 is the architectural link register. If a function saves LR, x30 may be
+  ;; used as a short-lived caller-saved temporary, but it must not be treated as
+  ;; callee-saved: `bl` overwrites LR before the callee runs. If LR is not saved
+  ;; at all, ban x30 entirely so a virtual register cannot clobber the return
+  ;; address.
+  (define effective-abi/no-lr
+    (if has-save?
+        (abi-unpreserve-gpr-reg effective-abi/base 30)
+        (abi-ban-gpr-reg effective-abi/base 30)))
+  (define effective-abi
+    (if (fn-establishes-frame-pointer? fn)
+        (abi-ban-gpr-reg effective-abi/no-lr 29)
+        effective-abi/no-lr))
 
   (define gpr-num-colors (reg-num-allocatable (abi-config-gpr effective-abi)))
   (define fpr-num-colors (reg-num-allocatable (abi-config-fpr effective-abi)))
